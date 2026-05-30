@@ -164,6 +164,34 @@ describe("renderSubagentResult fork indicator", () => {
 		assert.match(text, /session: \/tmp\/session\.jsonl/);
 	});
 
+	it("shows finalization turn counts in acceptance status", () => {
+		const widget = renderSubagentResult!({
+			content: [{ type: "text", text: "done" }],
+			details: {
+				mode: "single",
+				results: [{
+					agent: "worker",
+					task: "implement",
+					exitCode: 0,
+					messages: [],
+					usage: emptyUsage,
+					acceptance: {
+						status: "checked",
+						finalization: {
+							mode: "self-review-loop",
+							status: "completed",
+							maxTurns: 3,
+							turns: [{ turn: 1, status: "checked", prompt: "", rawOutput: "", runtimeChecks: [], verifyRuns: [] }],
+						},
+					},
+				}],
+			},
+		}, { expanded: false }, theme);
+
+		const text = widget.render(120).join("\n");
+		assert.match(text, /acceptance: checked · finalization: completed after 1\/3 turns/);
+	});
+
 	it("keeps failure reasons visible in compact rendering", () => {
 		const widget = renderSubagentResult!({
 			content: [{ type: "text", text: "failed" }],

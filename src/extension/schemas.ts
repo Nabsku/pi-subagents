@@ -105,7 +105,7 @@ const AcceptanceOverride = Type.Unsafe({
 			{ required: ["stopRules"] },
 		],
 	}],
-	description: "Optional acceptance contract. When present, the child must complete a same-session self-review/repair loop before acceptance is evaluated.",
+	description: "Optional acceptance contract. Use this for goal-style requests such as /goal, goal, active goal, or work until evidence says done: criteria define the target, evidence/verify define proof, stopRules define constraints, and maxFinalizationTurns defines the bounded loop. When present, the child must complete a same-session self-review/repair loop before acceptance is evaluated.",
 });
 
 const TaskItem = Type.Object({

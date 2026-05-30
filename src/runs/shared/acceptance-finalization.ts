@@ -29,11 +29,12 @@ export function formatAcceptanceFinalizationPrompt(input: {
 }): string {
 	const lines = [
 		"## Acceptance Finalization",
-		"You are continuing the same subagent session. Before this run can be accepted, review your own work against the acceptance contract.",
-		`This is finalization turn ${input.turn} of ${input.maxTurns}.`,
+		"You are continuing the same subagent session. Before this run can be accepted, compare the current work to the acceptance contract and the evidence below.",
+		`This is finalization turn ${input.turn} of ${input.maxTurns}. The run will be rejected if the contract is still not satisfied after turn ${input.maxTurns}.`,
 		"",
-		"If the work does not satisfy the contract and you can fix it now, make the correction in this same session before returning the report.",
-		"Do not claim a criterion is satisfied unless the current work has concrete evidence. If something remains missing, report it as not-satisfied with residual risks.",
+		"If a criterion is incomplete and fixable in this session, keep working now before returning the final report.",
+		"If a criterion cannot be satisfied in this session, report it as not-satisfied, explain the blocker in residualRisks, and say what input would unblock progress.",
+		"Do not claim a criterion is satisfied unless the current work has concrete evidence from files, commands, validation output, or other inspectable artifacts.",
 		"",
 		"## Acceptance Contract",
 		"Criteria:",
@@ -48,7 +49,7 @@ export function formatAcceptanceFinalizationPrompt(input: {
 		lines.push("", `Independent review gate after self-review: ${input.acceptance.review.required === false ? "optional" : "required"}${input.acceptance.review.agent ? ` by ${input.acceptance.review.agent}` : ""}.`);
 	}
 	if (input.acceptance.stopRules.length > 0) {
-		lines.push("", "Stop rules:", ...input.acceptance.stopRules.map((rule) => `- ${rule}`));
+		lines.push("", "Stop rules are hard constraints while deciding whether to continue, stop as blocked, or report success:", ...input.acceptance.stopRules.map((rule) => `- ${rule}`));
 	}
 	lines.push(
 		"",
@@ -63,7 +64,7 @@ export function formatAcceptanceFinalizationPrompt(input: {
 	}
 	lines.push(
 		"",
-		"Now do the final self-check. Finish with exactly one fenced JSON block tagged `acceptance-report`.",
+		"Now do the self-check. If work was missing and you repaired it, report the repaired final state. Finish with exactly one fenced JSON block tagged `acceptance-report`.",
 		"```acceptance-report",
 		JSON.stringify({
 			criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "specific proof from the final state" }],

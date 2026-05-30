@@ -105,6 +105,10 @@ describe("acceptance gates", () => {
 			previousFailure: "Acceptance rejected: missing",
 		});
 		assert.match(finalizationPrompt, /## Acceptance Finalization/);
+		assert.match(finalizationPrompt, /rejected if the contract is still not satisfied after turn 2/);
+		assert.match(finalizationPrompt, /explain the blocker in residualRisks/);
+		assert.match(finalizationPrompt, /concrete evidence from files, commands, validation output/);
+		assert.match(finalizationPrompt, /Stop rules are hard constraints/);
 		assert.match(finalizationPrompt, /Previous finalization failure/);
 		assert.match(finalizationPrompt, /exactly one fenced JSON block/);
 	});

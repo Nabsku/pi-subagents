@@ -225,7 +225,9 @@ function firstOutputLine(text: string): string {
 function formatAcceptanceStatus(result: Details["results"][number]): string | undefined {
 	const acceptance = result.acceptance;
 	if (!acceptance?.status || acceptance.status === "not-required") return undefined;
-	const finalization = acceptance.finalization ? ` · finalization: ${acceptance.finalization.status}` : "";
+	const finalization = acceptance.finalization
+		? ` · finalization: ${acceptance.finalization.status} after ${acceptance.finalization.turns.length}/${acceptance.finalization.maxTurns} turns`
+		: "";
 	return `acceptance: ${acceptance.status}${finalization}`;
 }
 
