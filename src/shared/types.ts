@@ -408,6 +408,13 @@ export interface AcceptanceLedger {
 	};
 }
 
+export interface ResourceLimitExceeded {
+	kind: "maxExecutionTimeMs" | "maxTokens";
+	limit: number;
+	observed?: number;
+	message: string;
+}
+
 export interface SingleResult {
 	agent: string;
 	task: string;
@@ -416,6 +423,7 @@ export interface SingleResult {
 	detachedReason?: string;
 	interrupted?: boolean;
 	timedOut?: boolean;
+	resourceLimitExceeded?: ResourceLimitExceeded;
 	messages?: Message[];
 	usage: Usage;
 	model?: string;
@@ -640,6 +648,7 @@ export interface AsyncStatus {
 		structuredOutputPath?: string;
 		structuredOutputSchemaPath?: string;
 		acceptance?: AcceptanceLedger;
+		resourceLimitExceeded?: ResourceLimitExceeded;
 	}>;
 	sessionDir?: string;
 	outputFile?: string;
@@ -801,6 +810,8 @@ export interface RunSyncOptions {
 	outputPath?: string;
 	outputMode?: OutputMode;
 	maxSubagentDepth?: number;
+	maxExecutionTimeMs?: number;
+	maxTokens?: number;
 	nestedRoute?: NestedRouteInfo;
 	/** Override the agent's default model (format: "provider/id" or just "id") */
 	modelOverride?: string;

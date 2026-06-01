@@ -44,6 +44,7 @@ import {
 	detectSubagentError,
 	extractToolArgsPreview,
 	extractTextFromContent,
+	formatResourceLimitExceeded,
 } from "../../shared/utils.ts";
 import { buildSkillInjection, resolveSkillsWithFallback } from "../../agents/skills.ts";
 import { evaluateCompletionMutationGuard, resolveCompletionPolicy, type CompletionPolicy } from "../shared/completion-guard.ts";
@@ -301,8 +302,11 @@ async function runSingleAttempt(
 		let intercomStarted = false;
 		let assistantError: string | undefined;
 		let timedOut = false;
+		let resourceLimited = false;
 		let timeoutTimer: NodeJS.Timeout | undefined;
 		let timeoutEscalationTimer: NodeJS.Timeout | undefined;
+		let resourceLimitTimer: NodeJS.Timeout | undefined;
+		let resourceLimitEscalationTimer: NodeJS.Timeout | undefined;
 		let removeAbortListener: (() => void) | undefined;
 		let removeInterruptListener: (() => void) | undefined;
 		let activityTimer: NodeJS.Timeout | undefined;
@@ -381,6 +385,14 @@ async function runSingleAttempt(
 			if (timeoutEscalationTimer) {
 				clearTimeout(timeoutEscalationTimer);
 				timeoutEscalationTimer = undefined;
+			}
+			if (resourceLimitTimer) {
+				clearTimeout(resourceLimitTimer);
+				resourceLimitTimer = undefined;
+			}
+			if (resourceLimitEscalationTimer) {
+				clearTimeout(resourceLimitEscalationTimer);
+				resourceLimitEscalationTimer = undefined;
 			}
 			if (activityTimer) {
 				clearInterval(activityTimer);
@@ -476,6 +488,26 @@ async function runSingleAttempt(
 		};
 
 
+		const triggerResourceLimit = (kind: "maxExecutionTimeMs" | "maxTokens", limit: number, observed?: number) => {
+			if (processClosed || detached || settled || timedOut || resourceLimited) return;
+			resourceLimited = true;
+			const message = formatResourceLimitExceeded({ agent: agent.name, kind, limit, observed });
+			result.resourceLimitExceeded = { kind, limit, ...(observed !== undefined ? { observed } : {}), message };
+			result.error = message;
+			result.finalOutput = message;
+			progress.status = "failed";
+			progress.durationMs = Date.now() - startTime;
+			appendRecentOutput(progress, [message]);
+			progress.activityState = undefined;
+			fireUpdate();
+			trySignalChild(proc, "SIGINT");
+			resourceLimitEscalationTimer = setTimeout(() => {
+				if (settled || processClosed || detached) return;
+				trySignalChild(proc, "SIGTERM");
+			}, 1000);
+			resourceLimitEscalationTimer.unref?.();
+		};
+
 		const emitUpdateSnapshot = (text: string) => {
 			if (!options.onUpdate || processClosed) return;
 			const progressSnapshot = snapshotProgress(progress);
@@ -560,6 +592,9 @@ async function runSingleAttempt(
 						result.usage.cacheWrite += u.cacheWrite || 0;
 						result.usage.cost += u.cost?.total || 0;
 						progress.tokens = result.usage.input + result.usage.output;
+						if (options.maxTokens !== undefined && progress.tokens >= options.maxTokens) {
+							triggerResourceLimit("maxTokens", options.maxTokens, progress.tokens);
+						}
 					}
 					if (!result.model && evt.message.model) result.model = evt.message.model;
 					if (evt.message.errorMessage) assistantError = evt.message.errorMessage;
@@ -690,7 +725,7 @@ async function runSingleAttempt(
 
 		if (options.timeoutAt !== undefined) {
 			const triggerTimeout = () => {
-				if (processClosed || detached || settled || timedOut) return;
+				if (processClosed || detached || settled || timedOut || resourceLimited) return;
 				timedOut = true;
 				const message = formatForegroundTimeoutMessage(options.timeoutMs);
 				result.timedOut = true;
@@ -716,9 +751,17 @@ async function runSingleAttempt(
 			}
 		}
 
+		if (options.maxExecutionTimeMs !== undefined) {
+			const maxExecutionTimeMs = options.maxExecutionTimeMs;
+			resourceLimitTimer = setTimeout(() => {
+				triggerResourceLimit("maxExecutionTimeMs", maxExecutionTimeMs);
+			}, maxExecutionTimeMs);
+			resourceLimitTimer.unref?.();
+		}
+
 		if (options.interruptSignal) {
 			const interrupt = () => {
-				if (processClosed || detached || settled || timedOut) return;
+				if (processClosed || detached || settled || timedOut || resourceLimited) return;
 				interruptedByControl = true;
 				progress.status = "running";
 				progress.durationMs = Date.now() - startTime;
@@ -740,6 +783,23 @@ async function runSingleAttempt(
 		}
 	});
 	result.exitCode = exitCode;
+	if (result.resourceLimitExceeded) {
+		result.exitCode = 1;
+		result.error = result.error ?? result.resourceLimitExceeded.message;
+		result.finalOutput = result.finalOutput || result.error;
+		if (result.progress) {
+			result.progress.status = "failed";
+			result.progress.activityState = undefined;
+			result.progress.durationMs = Date.now() - startTime;
+		}
+		result.progressSummary = {
+			toolCount: progress.toolCount,
+			tokens: progress.tokens,
+			durationMs: result.progress?.durationMs ?? Date.now() - startTime,
+		};
+		result.controlEvents = allControlEvents.length ? allControlEvents : undefined;
+		return result;
+	}
 	if (result.timedOut) {
 		result.exitCode = FOREGROUND_TIMEOUT_EXIT_CODE;
 		result.error = result.error ?? formatForegroundTimeoutMessage(options.timeoutMs);
@@ -1011,8 +1071,13 @@ export async function runSync(
 	if (options.timeoutAt !== undefined && Date.now() >= options.timeoutAt) {
 		return createTimedOutResult(agentName, task, options);
 	}
+	const effectiveOptions: RunSyncOptions = {
+		...options,
+		maxExecutionTimeMs: options.maxExecutionTimeMs ?? agent.maxExecutionTimeMs,
+		maxTokens: options.maxTokens ?? agent.maxTokens,
+	};
 
-	const shareEnabled = options.share === true;
+	const shareEnabled = effectiveOptions.share === true;
 	const effectiveAcceptance = resolveEffectiveAcceptance({
 		explicit: options.acceptance,
 		agentName,
@@ -1063,13 +1128,13 @@ export async function runSync(
 
 	let artifactPathsResult: ArtifactPaths | undefined;
 	let jsonlPath: string | undefined;
-	if (options.artifactsDir && options.artifactConfig?.enabled !== false) {
-		artifactPathsResult = getArtifactPaths(options.artifactsDir, options.runId, agentName, options.index);
-		ensureArtifactsDir(options.artifactsDir);
-		if (options.artifactConfig?.includeInput !== false) {
+	if (effectiveOptions.artifactsDir && effectiveOptions.artifactConfig?.enabled !== false) {
+		artifactPathsResult = getArtifactPaths(effectiveOptions.artifactsDir, effectiveOptions.runId, agentName, effectiveOptions.index);
+		ensureArtifactsDir(effectiveOptions.artifactsDir);
+		if (effectiveOptions.artifactConfig?.includeInput !== false) {
 				writeArtifact(artifactPathsResult.inputPath, `# Task for ${agentName}\n\n${taskWithAcceptance}`);
 		}
-		if (options.artifactConfig?.includeJsonl !== false) {
+		if (effectiveOptions.artifactConfig?.includeJsonl !== false) {
 			jsonlPath = artifactPathsResult.jsonlPath;
 		}
 	}
@@ -1079,8 +1144,8 @@ export async function runSync(
 	for (let i = 0; i < modelsToTry.length; i++) {
 		const candidate = modelsToTry[i];
 		if (candidate) attemptedModels.push(candidate);
-		const outputSnapshot = captureSingleOutputSnapshot(options.outputPath);
-		const result = await runSingleAttempt(runtimeCwd, agent, taskWithAcceptance, candidate, options, {
+		const outputSnapshot = captureSingleOutputSnapshot(effectiveOptions.outputPath);
+		const result = await runSingleAttempt(runtimeCwd, agent, taskWithAcceptance, candidate, effectiveOptions, {
 			sessionEnabled,
 			systemPrompt,
 			resolvedSkillNames: resolvedSkills.length > 0 ? resolvedSkills.map((skill) => skill.name) : undefined,
@@ -1115,7 +1180,7 @@ export async function runSync(
 		if (attemptSucceeded) {
 			break;
 		}
-		if (result.timedOut || !isRetryableModelFailure(result.error) || i === modelsToTry.length - 1) {
+		if (result.timedOut || result.resourceLimitExceeded || !isRetryableModelFailure(result.error) || i === modelsToTry.length - 1) {
 			break;
 		}
 		attemptNotes.push(formatModelAttemptNote(attempt, modelsToTry[i + 1]));

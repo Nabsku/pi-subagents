@@ -19,6 +19,7 @@ import {
 	type ModelAttempt,
 	type NestedRouteInfo,
 	type ResolvedControlConfig,
+	type ResourceLimitExceeded,
 	type SubagentRunMode,
 	type TokenUsage,
 	type Usage,
@@ -53,7 +54,7 @@ import { collectDynamicResults, DynamicFanoutError, materializeDynamicParallelSt
 import { nestedSummaryFromAsyncStatus, writeNestedEvent } from "../shared/nested-events.ts";
 import { formatModelAttemptNote, isRetryableModelFailure } from "../shared/model-fallback.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
-import { detectSubagentError, extractTextFromContent, extractToolArgsPreview, getFinalOutput } from "../../shared/utils.ts";
+import { detectSubagentError, extractTextFromContent, extractToolArgsPreview, formatResourceLimitExceeded, getFinalOutput } from "../../shared/utils.ts";
 import { evaluateCompletionMutationGuard, resolveCompletionPolicy } from "../shared/completion-guard.ts";
 import {
 	createMutatingFailureState,
@@ -140,6 +141,7 @@ interface StepResult {
 	structuredOutputPath?: string;
 	structuredOutputSchemaPath?: string;
 	acceptance?: AcceptanceLedger;
+	resourceLimitExceeded?: ResourceLimitExceeded;
 }
 
 const ASYNC_INTERRUPT_SIGNAL: NodeJS.Signals = process.platform === "win32" ? "SIGBREAK" : "SIGUSR2";
@@ -234,6 +236,7 @@ interface RunPiStreamingResult {
 	finalOutput: string;
 	interrupted?: boolean;
 	observedMutationAttempt?: boolean;
+	resourceLimitExceeded?: ResourceLimitExceeded;
 }
 
 function runPiStreaming(
@@ -247,6 +250,8 @@ function runPiStreaming(
 	childEventContext?: ChildEventContext,
 	registerInterrupt?: (interrupt: (() => void) | undefined) => void,
 	onChildEvent?: (event: ChildEvent) => void,
+	maxExecutionTimeMs?: number,
+	maxTokens?: number,
 ): Promise<RunPiStreamingResult> {
 	return new Promise((resolve) => {
 		const outputStream = fs.createWriteStream(outputFile, { flags: "w" });
@@ -270,7 +275,10 @@ function runPiStreaming(
 		let error: string | undefined;
 		let assistantError: string | undefined;
 		let interrupted = false;
+		let resourceLimitExceeded: ResourceLimitExceeded | undefined;
 		let observedMutationAttempt = false;
+		let resourceLimitTimer: NodeJS.Timeout | undefined;
+		let resourceLimitEscalationTimer: NodeJS.Timeout | undefined;
 		const rawStdoutLines: string[] = [];
 
 		const writeOutputLine = (line: string) => {
@@ -282,6 +290,19 @@ function runPiStreaming(
 			for (const line of text.split("\n")) {
 				writeOutputLine(line);
 			}
+		};
+
+		const triggerResourceLimit = (kind: ResourceLimitExceeded["kind"], limit: number, observed?: number) => {
+			if (settled || resourceLimitExceeded) return;
+			const message = formatResourceLimitExceeded({ agent: childEventContext?.agent ?? "subagent", kind, limit, observed });
+			resourceLimitExceeded = { kind, limit, ...(observed !== undefined ? { observed } : {}), message };
+			error = message;
+			writeOutputLine(message);
+			trySignalChild(child, "SIGINT");
+			resourceLimitEscalationTimer = setTimeout(() => {
+				if (!settled) trySignalChild(child, "SIGTERM");
+			}, 1000);
+			resourceLimitEscalationTimer.unref?.();
 		};
 
 		const appendChildEvent = (event: Record<string, unknown>) => {
@@ -338,6 +359,10 @@ function runPiStreaming(
 					usage.cacheRead += eventUsage.cacheRead ?? 0;
 					usage.cacheWrite += eventUsage.cacheWrite ?? 0;
 					usage.cost += eventUsage.cost?.total ?? 0;
+					const observedTokens = usage.input + usage.output;
+					if (maxTokens !== undefined && observedTokens >= maxTokens) {
+						triggerResourceLimit("maxTokens", maxTokens, observedTokens);
+					}
 				}
 				const stopReason = (event.message as { stopReason?: string }).stopReason;
 				const hasToolCall = Array.isArray(event.message.content)
@@ -373,6 +398,12 @@ function runPiStreaming(
 		let finalDrainTimer: NodeJS.Timeout | undefined;
 		let finalHardKillTimer: NodeJS.Timeout | undefined;
 		let settled = false;
+		if (maxExecutionTimeMs !== undefined) {
+			resourceLimitTimer = setTimeout(() => {
+				triggerResourceLimit("maxExecutionTimeMs", maxExecutionTimeMs);
+			}, maxExecutionTimeMs);
+			resourceLimitTimer.unref?.();
+		}
 		const clearStdioGuard = attachPostExitStdioGuard(child, { idleMs: 2000, hardMs: 8000 });
 		child.stdout.on("data", (chunk: Buffer) => {
 			const text = chunk.toString();
@@ -386,7 +417,7 @@ function runPiStreaming(
 			processStderrText(chunk.toString());
 		});
 		registerInterrupt?.(() => {
-			if (settled) return;
+			if (settled || resourceLimitExceeded) return;
 			interrupted = true;
 			if (!error) error = "Interrupted. Waiting for explicit next action.";
 			trySignalChild(child, "SIGINT");
@@ -402,6 +433,14 @@ function runPiStreaming(
 			if (finalHardKillTimer) {
 				clearTimeout(finalHardKillTimer);
 				finalHardKillTimer = undefined;
+			}
+			if (resourceLimitTimer) {
+				clearTimeout(resourceLimitTimer);
+				resourceLimitTimer = undefined;
+			}
+			if (resourceLimitEscalationTimer) {
+				clearTimeout(resourceLimitEscalationTimer);
+				resourceLimitEscalationTimer = undefined;
 			}
 		};
 		function startFinalDrain(): void {
@@ -434,12 +473,12 @@ function runPiStreaming(
 			if (stdoutBuf.trim()) processStdoutLine(stdoutBuf);
 			if (stderrBuf.trim()) appendChildLine("subagent.child.stderr", stderrBuf);
 			outputStream.end();
-			const finalOutput = getFinalOutput(messages) || rawStdoutLines.join("\n").trim();
-			const finalError = error ?? assistantError;
+			const finalOutput = resourceLimitExceeded?.message ?? (getFinalOutput(messages) || rawStdoutLines.join("\n").trim());
+			const finalError = resourceLimitExceeded?.message ?? error ?? assistantError;
 			const forcedDrainAfterFinalSuccess = forcedTerminationSignal && cleanTerminalAssistantStopReceived && !finalError;
 			resolve({
 				stderr,
-				exitCode: interrupted || forcedDrainAfterFinalSuccess ? 0 : forcedTerminationSignal || signal ? (exitCode ?? 1) : exitCode,
+				exitCode: resourceLimitExceeded ? 1 : interrupted || forcedDrainAfterFinalSuccess ? 0 : forcedTerminationSignal || signal ? (exitCode ?? 1) : exitCode,
 				messages,
 				usage,
 				model,
@@ -447,6 +486,7 @@ function runPiStreaming(
 				finalOutput,
 				interrupted,
 				observedMutationAttempt,
+				resourceLimitExceeded,
 			});
 		});
 
@@ -456,9 +496,9 @@ function runPiStreaming(
 			clearDrainTimers();
 			clearStdioGuard();
 			outputStream.end();
-			const finalOutput = getFinalOutput(messages) || rawStdoutLines.join("\n").trim();
+			const finalOutput = resourceLimitExceeded?.message ?? (getFinalOutput(messages) || rawStdoutLines.join("\n").trim());
 			const spawnErrorMessage = spawnError instanceof Error ? spawnError.message : String(spawnError);
-			resolve({ stderr, exitCode: 1, messages, usage, model, error: error ?? assistantError ?? spawnErrorMessage, finalOutput, observedMutationAttempt });
+			resolve({ stderr, exitCode: 1, messages, usage, model, error: resourceLimitExceeded?.message ?? error ?? assistantError ?? spawnErrorMessage, finalOutput, observedMutationAttempt, resourceLimitExceeded });
 		});
 	});
 }
@@ -614,6 +654,7 @@ async function runSingleStep(
 	structuredOutputPath?: string;
 	structuredOutputSchemaPath?: string;
 	acceptance?: AcceptanceLedger;
+	resourceLimitExceeded?: ResourceLimitExceeded;
 }> {
 	const effectiveStructuredOutput = step.structuredOutput ?? (step.structuredOutputSchema
 		? createStructuredOutputRuntime(step.structuredOutputSchema, path.join(path.dirname(ctx.outputFile), "structured-output"))
@@ -701,6 +742,8 @@ async function runSingleStep(
 			{ eventsPath, runId: ctx.id, stepIndex: ctx.flatIndex, agent: step.agent },
 			ctx.registerInterrupt,
 			ctx.onChildEvent,
+			step.maxExecutionTimeMs,
+			step.maxTokens,
 		);
 		cleanupTempDir(tempDir);
 
@@ -766,7 +809,7 @@ async function runSingleStep(
 		finalOutputSnapshot = outputSnapshot;
 		finalResult = { ...run, exitCode: effectiveExitCode, model: candidate ?? run.model, error, structuredOutput } as RunPiStreamingResult & { structuredOutput?: unknown };
 		if (attempt.success || completionGuardError) break;
-		if (!isRetryableModelFailure(error) || index === candidates.length - 1) break;
+		if (run.resourceLimitExceeded || !isRetryableModelFailure(error) || index === candidates.length - 1) break;
 		attemptNotes.push(formatModelAttemptNote(attempt, candidates[index + 1]));
 	}
 
@@ -861,6 +904,8 @@ async function runSingleStep(
 					{ eventsPath, runId: ctx.id, stepIndex: ctx.flatIndex, agent: step.agent },
 					ctx.registerInterrupt,
 					ctx.onChildEvent,
+					step.maxExecutionTimeMs,
+					step.maxTokens,
 				);
 				cleanupTempDir(tempDir);
 				modelAttempts.push({
@@ -923,6 +968,7 @@ async function runSingleStep(
 					model: finalResult?.model,
 					attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
 					modelAttempts,
+					resourceLimitExceeded: finalResult?.resourceLimitExceeded,
 					skills: step.skills,
 					timestamp: Date.now(),
 				}, null, 2),
@@ -948,6 +994,7 @@ async function runSingleStep(
 		structuredOutputPath: effectiveStructuredOutput?.outputPath,
 		structuredOutputSchemaPath: effectiveStructuredOutput?.schemaPath,
 		acceptance,
+		resourceLimitExceeded: finalResult?.resourceLimitExceeded,
 	};
 }
 
@@ -1712,12 +1759,14 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				statusPayload.steps[fi].structuredOutputPath = singleResult.structuredOutputPath;
 				statusPayload.steps[fi].structuredOutputSchemaPath = singleResult.structuredOutputSchemaPath;
 				statusPayload.steps[fi].acceptance = singleResult.acceptance;
+				statusPayload.steps[fi].resourceLimitExceeded = singleResult.resourceLimitExceeded;
 				statusPayload.lastUpdate = taskEndTime;
 				writeStatusPayload();
 				appendJsonl(eventsPath, JSON.stringify({
 					type: singleResult.exitCode === 0 ? "subagent.step.completed" : "subagent.step.failed",
 					ts: taskEndTime, runId: id, stepIndex: fi, agent: task.agent,
 					exitCode: singleResult.exitCode, durationMs: taskEndTime - taskStartTime,
+					resourceLimitExceeded: singleResult.resourceLimitExceeded,
 				}));
 				if (singleResult.exitCode !== 0 && failFast) aborted = true;
 				return { ...singleResult, skipped: false };
@@ -1742,6 +1791,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					structuredOutputPath: pr.structuredOutputPath,
 					structuredOutputSchemaPath: pr.structuredOutputSchemaPath,
 					acceptance: pr.acceptance,
+					resourceLimitExceeded: pr.resourceLimitExceeded,
 				});
 			}
 			const collection = collectDynamicResults(step as Parameters<typeof collectDynamicResults>[0], materialized.items, parallelResults);
@@ -1941,6 +1991,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						statusPayload.steps[fi].structuredOutputPath = singleResult.structuredOutputPath;
 						statusPayload.steps[fi].structuredOutputSchemaPath = singleResult.structuredOutputSchemaPath;
 						statusPayload.steps[fi].acceptance = singleResult.acceptance;
+						statusPayload.steps[fi].resourceLimitExceeded = singleResult.resourceLimitExceeded;
 						statusPayload.lastUpdate = taskEndTime;
 						writeStatusPayload();
 
@@ -1948,6 +1999,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 							type: singleResult.exitCode === 0 ? "subagent.step.completed" : "subagent.step.failed",
 							ts: taskEndTime, runId: id, stepIndex: fi, agent: task.agent,
 							exitCode: singleResult.exitCode, durationMs: taskDuration,
+							resourceLimitExceeded: singleResult.resourceLimitExceeded,
 						}));
 						if (singleResult.completionGuardTriggered) {
 							const event = buildControlEvent({
@@ -2006,6 +2058,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 							structuredOutputPath: pr.structuredOutputPath,
 							structuredOutputSchemaPath: pr.structuredOutputSchemaPath,
 							acceptance: pr.acceptance,
+							resourceLimitExceeded: pr.resourceLimitExceeded,
 						});
 					}
 				for (let t = 0; t < group.parallel.length; t++) {
@@ -2107,6 +2160,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				structuredOutputPath: singleResult.structuredOutputPath,
 				structuredOutputSchemaPath: singleResult.structuredOutputSchemaPath,
 				acceptance: singleResult.acceptance,
+				resourceLimitExceeded: singleResult.resourceLimitExceeded,
 			});
 			if (seqStep.outputName) {
 				outputs[seqStep.outputName] = outputEntryFromAsyncResult({
@@ -2152,6 +2206,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			statusPayload.steps[flatIndex].structuredOutputPath = singleResult.structuredOutputPath;
 			statusPayload.steps[flatIndex].structuredOutputSchemaPath = singleResult.structuredOutputSchemaPath;
 			statusPayload.steps[flatIndex].acceptance = singleResult.acceptance;
+			statusPayload.steps[flatIndex].resourceLimitExceeded = singleResult.resourceLimitExceeded;
 			if (stepTokens) {
 				statusPayload.steps[flatIndex].tokens = stepTokens;
 				statusPayload.totalTokens = { ...previousCumulativeTokens };
@@ -2168,6 +2223,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				exitCode: singleResult.exitCode,
 				durationMs: stepEndTime - stepStartTime,
 				tokens: stepTokens,
+				resourceLimitExceeded: singleResult.resourceLimitExceeded,
 			}));
 			if (singleResult.completionGuardTriggered) {
 				const event = buildControlEvent({
@@ -2314,6 +2370,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				structuredOutputPath: r.structuredOutputPath,
 				structuredOutputSchemaPath: r.structuredOutputSchemaPath,
 				acceptance: r.acceptance,
+				resourceLimitExceeded: r.resourceLimitExceeded,
 			})),
 			outputs,
 			workflowGraph: statusPayload.workflowGraph,

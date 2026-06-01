@@ -436,6 +436,8 @@ defaultProgress: true
 completionGuard: false
 interactive: true
 maxSubagentDepth: 1
+maxExecutionTimeMs: 600000
+maxTokens: 50000
 ---
 
 Your system prompt goes here.
@@ -462,6 +464,8 @@ Important fields:
 | `completionGuard` | Set `false` only for non-implementation agents that may mention implementation words while using mutation-capable tools such as `bash`. |
 | `interactive` | Parsed for compatibility but not enforced in v1. |
 | `maxSubagentDepth` | Tightens nested delegation for this agent’s children. |
+| `maxExecutionTimeMs` | Stops each foreground or async child run for this agent after the given number of milliseconds. |
+| `maxTokens` | Stops each foreground or async child run for this agent when observed input plus output tokens reach the limit. Token enforcement is best-effort because usage is reported after model events arrive. |
 
 ### Tool and extension selection
 
@@ -912,6 +916,19 @@ Session directory precedence is: `params.sessionDir`, then `config.defaultSessio
 
 Controls nested delegation when no inherited `PI_SUBAGENT_MAX_DEPTH` is already in effect. Per-agent `maxSubagentDepth` can tighten the limit for that agent’s child runs, but cannot relax an inherited stricter limit. This applies even to children that explicitly declare `tools: subagent`; at the cap, execution fanout is blocked instead of silently hiding nested work.
 
+### Agent resource limits
+
+Set `maxExecutionTimeMs` and `maxTokens` in agent frontmatter or through `subagent({ action: "create" | "update", config })` to bound a specific agent across foreground and async runs.
+
+```yaml
+maxExecutionTimeMs: 600000
+maxTokens: 50000
+```
+
+When a limit is reached, the child receives a soft interrupt, the run fails with a clear `Resource limit exceeded...` error, and the result includes `resourceLimitExceeded` with the limit kind, configured limit, and observed token count when available. Resource-limit failures do not trigger fallback model retries. `maxTokens` is best-effort because providers report usage after message events; a child may exceed the exact limit before the runtime can stop it.
+
+Spawn-count and per-agent child-concurrency quotas are not part of this release; use `maxSubagentDepth` and parallel `concurrency` for those boundaries today.
+
 ### `intercomBridge`
 
 ```json
@@ -970,7 +987,7 @@ Debug artifacts live under `{sessionDir}/subagent-artifacts/` or a user-scoped t
 - `{runId}_{agent}.jsonl`
 - `{runId}_{agent}_meta.json`
 
-Metadata records timing, usage, exit code, final model, attempted models, and fallback attempt outcomes.
+Metadata records timing, usage, exit code, final model, attempted models, fallback attempt outcomes, and any resource-limit termination reason.
 
 Session files are stored under a per-run session directory. With `context: "fork"`, each child starts with `--session <branched-session-file>` produced from the parent’s current leaf. That is a real session fork, not an injected summary.
 

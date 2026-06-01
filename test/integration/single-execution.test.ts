@@ -77,6 +77,7 @@ interface RunSyncResult {
 	finalOutput?: string;
 	interrupted?: boolean;
 	timedOut?: boolean;
+	resourceLimitExceeded?: { kind: "maxExecutionTimeMs" | "maxTokens"; limit: number; observed?: number; message: string };
 	detached?: boolean;
 	detachedReason?: string;
 	savedOutputPath?: string;
@@ -1263,7 +1264,36 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.timedOut, true);
 		assert.equal(result.interrupted, undefined);
 		assert.match(result.error ?? "", /Timed out after 150ms/);
-		assert.equal(mockPi.callCount(), 1, "timeout should not retry fallback models");
+		assert.deepEqual(result.attemptedModels, ["mock/primary"], "timeout should not retry fallback models");
+	});
+
+	it("enforces an agent maxExecutionTimeMs limit without retrying fallback models", async () => {
+		mockPi.onCall({ delay: 10000 });
+		const agents = [makeAgent("slow", { model: "mock/primary", fallbackModels: ["mock/fallback"], maxExecutionTimeMs: 150 })];
+
+		const start = Date.now();
+		const result = await runSync(tempDir, agents, "slow", "Slow task", { runId: "agent-time-limit-run" });
+		const elapsed = Date.now() - start;
+
+		assert.ok(elapsed < 5000, `should stop early, took ${elapsed}ms`);
+		assert.equal(result.exitCode, 1);
+		assert.equal(result.resourceLimitExceeded?.kind, "maxExecutionTimeMs");
+		assert.equal(result.resourceLimitExceeded?.limit, 150);
+		assert.match(result.error ?? "", /Resource limit exceeded.*maxExecutionTimeMs 150ms/);
+		assert.deepEqual(result.attemptedModels, ["mock/primary"], "resource limit should not retry fallback models");
+	});
+
+	it("enforces an agent maxTokens limit from observed usage", async () => {
+		mockPi.onCall({ output: "Used tokens" });
+		const agents = [makeAgent("echo", { maxTokens: 100 })];
+
+		const result = await runSync(tempDir, agents, "echo", "Task", { runId: "agent-token-limit-run" });
+
+		assert.equal(result.exitCode, 1);
+		assert.equal(result.resourceLimitExceeded?.kind, "maxTokens");
+		assert.equal(result.resourceLimitExceeded?.limit, 100);
+		assert.equal(result.resourceLimitExceeded?.observed, 150);
+		assert.match(result.error ?? "", /Resource limit exceeded.*maxTokens 100 \(observed 150\)/);
 	});
 
 	it("soft-interrupts the current turn and returns a paused result", async () => {

@@ -370,6 +370,8 @@ export function executeAsyncChain(
 			outputMode: behavior.outputMode,
 			sessionFile,
 			maxSubagentDepth: resolveChildMaxSubagentDepth(maxSubagentDepth, a.maxSubagentDepth),
+			maxExecutionTimeMs: a.maxExecutionTimeMs,
+			maxTokens: a.maxTokens,
 			effectiveAcceptance: resolveEffectiveAcceptance({
 				explicit: s.acceptance,
 				agentName: s.agent,
@@ -689,6 +691,8 @@ export function executeAsyncSingle(
 						outputMode,
 						sessionFile,
 						maxSubagentDepth: resolveChildMaxSubagentDepth(maxSubagentDepth, agentConfig.maxSubagentDepth),
+						maxExecutionTimeMs: agentConfig.maxExecutionTimeMs,
+						maxTokens: agentConfig.maxTokens,
 						effectiveAcceptance: resolveEffectiveAcceptance({
 							explicit: params.acceptance,
 							agentName: agent,

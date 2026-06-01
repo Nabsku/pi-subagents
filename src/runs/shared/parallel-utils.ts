@@ -25,6 +25,8 @@ export interface RunnerSubagentStep {
 	outputMode?: "inline" | "file-only";
 	sessionFile?: string;
 	maxSubagentDepth?: number;
+	maxExecutionTimeMs?: number;
+	maxTokens?: number;
 	structuredOutput?: {
 		schema: JsonSchemaObject;
 		schemaPath: string;

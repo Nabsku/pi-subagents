@@ -29,7 +29,7 @@ interface AsyncResultPayload {
 	sessionId?: string;
 	mode?: string;
 	summary?: string;
-	results: Array<{ output?: string; success?: boolean; error?: string; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }>; structuredOutput?: unknown; intercomTarget?: string; acceptance?: { status?: string; childReport?: unknown } }>;
+	results: Array<{ output?: string; success?: boolean; error?: string; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }>; structuredOutput?: unknown; intercomTarget?: string; acceptance?: { status?: string; childReport?: unknown }; resourceLimitExceeded?: { kind?: string; limit?: number; observed?: number; message?: string } }>;
 	outputs?: Record<string, { text?: string; structured?: unknown }>;
 	workflowGraph?: { nodes?: Array<{ kind?: string; label?: string; phase?: string; status?: string; error?: string; outputName?: string; structured?: boolean; children?: Array<{ label?: string; outputName?: string; itemKey?: string; status?: string; error?: string }> }> };
 }
@@ -57,6 +57,7 @@ interface AsyncStatusPayload {
 		thinking?: string;
 		tokens?: { total: number };
 		acceptance?: { status?: string };
+		resourceLimitExceeded?: { kind?: string; limit?: number; observed?: number; message?: string };
 	}>;
 }
 
@@ -272,6 +273,33 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.match(chainResult.content[0]?.text ?? "", /Async chain:/);
 		assert.match(chainResult.content[0]?.text ?? "", /Do not run sleep timers or polling loops/);
 		await waitForAsyncResultFile(chainId, 10_000);
+	});
+
+	it("async single enforces agent maxTokens from observed usage", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ output: "Used async tokens" });
+		const id = `async-token-limit-${Date.now().toString(36)}`;
+
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Use too many tokens",
+			agentConfig: makeAgent("worker", { maxTokens: 100 }),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-token-limit" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const result = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const statusPath = path.join(ASYNC_DIR, id, "status.json");
+		const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
+
+		assert.equal(result.success, false);
+		assert.equal(result.results[0]?.success, false);
+		assert.equal(result.results[0]?.resourceLimitExceeded?.kind, "maxTokens");
+		assert.equal(result.results[0]?.resourceLimitExceeded?.limit, 100);
+		assert.equal(result.results[0]?.resourceLimitExceeded?.observed, 150);
+		assert.match(result.results[0]?.error ?? "", /Resource limit exceeded.*maxTokens 100 \(observed 150\)/);
+		assert.equal(status.steps?.[0]?.resourceLimitExceeded?.kind, "maxTokens");
 	});
 
 	it("top-level async parallel conversion preserves output, reads, and progress", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : undefined }, async () => {
