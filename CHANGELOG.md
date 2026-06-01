@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- Strengthened tool and skill guidance so writer subagents launched from plans, specs, issues, or broad fixes proactively use structured `acceptance` instead of burying validation requirements only in task prose.
+
 ## [0.27.0] - 2026-05-30
 
 ### Changed

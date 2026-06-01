@@ -1018,6 +1018,32 @@ Public acceptance config is evidence-driven. There is no public `level` field an
 
 Self-review finalization never counts as `reviewed`, and it never counts as `verified` unless configured runtime verification commands actually pass. The visible child output remains the initial answer; finalization reports and residual risks are stored in the acceptance ledger and async/status details.
 
+When delegating implementation from a plan or spec, keep the task focused on what to implement and put the definition of done in `acceptance` so the runtime can finalize and evaluate it:
+
+```ts
+subagent({
+  agent: "worker",
+  async: true,
+  task: "Implement the plan at /Users/me/docs/mcp-alignment-plan.md. Use scout artifacts in ./handoff/ as context. Do not commit the scout artifacts.",
+  acceptance: {
+    criteria: [
+      "Implementation follows /Users/me/docs/mcp-alignment-plan.md",
+      "Plan acceptance checks are addressed",
+      "Scout handoff artifacts are not committed",
+      "Focused validation for changed behavior passes",
+      "Residual risks or skipped checks are reported"
+    ],
+    evidence: ["changed-files", "commands-run", "validation-output", "residual-risks"],
+    verify: [{ id: "focused", command: "npm test -- --runInBand" }],
+    stopRules: [
+      "Do not edit unrelated files",
+      "Stop and report if the plan requires an unapproved product decision"
+    ],
+    maxFinalizationTurns: 3
+  }
+})
+```
+
 ## Live progress
 
 Foreground runs show compact live progress for single, chain, and parallel modes: current tool, recent output, token counts, duration, activity freshness, current-tool duration, and chain graph metadata when available.

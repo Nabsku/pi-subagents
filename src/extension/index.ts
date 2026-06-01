@@ -396,6 +396,7 @@ EXECUTION (use exactly ONE mode):
 • PARALLEL: { tasks: [{agent,task,count?,output?,reads?,progress?}, ...], concurrency?: number, worktree?: true } - concurrent execution (worktree: isolate each task in a git worktree)
 • Optional context: { context: "fresh" | "fork" } (default: if any requested agent has defaultContext: "fork", the whole invocation uses fork; otherwise "fresh"; inspect agent defaults via { action: "list" })
 • Goal-style requests: when the user says “/goal”, “goal”, “active goal”, “work until evidence says done”, or “verify against a goal”, model that as explicit acceptance. Use acceptance.criteria for the target, acceptance.evidence/verify for proof, acceptance.stopRules for constraints, and acceptance.maxFinalizationTurns for the bounded loop.
+• Plan/spec implementation handoffs: when delegating a plan, PRD, spec, issue, or broad fix to an editing-capable child, prefer structured acceptance instead of burying validation requirements in task prose. Put the implementation instructions and plan paths in task; put the definition of done, evidence, verification commands, constraints, and loop cap in acceptance.
 
 CHAIN TEMPLATE VARIABLES (use in task strings):
 • {task} - The original task/request from the user
