@@ -20,6 +20,7 @@ import {
 } from "../../src/runs/shared/pi-args.ts";
 
 const originalEnv = {
+	PATH: process.env.PATH,
 	HOME: process.env.HOME,
 	USERPROFILE: process.env.USERPROFILE,
 	PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
@@ -61,6 +62,15 @@ function createMcpFixture(): McpFixture {
 function writeJson(filePath: string, value: unknown): void {
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
 	fs.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf-8");
+}
+
+function installFakeNpmRoot(root: string, globalNpmRoot: string): void {
+	const binDir = path.join(root, "bin");
+	fs.mkdirSync(binDir, { recursive: true });
+	const npmPath = path.join(binDir, "npm");
+	fs.writeFileSync(npmPath, `#!/bin/sh\nif [ "$1" = "root" ] && [ "$2" = "-g" ]; then\n  printf '%s\\n' '${globalNpmRoot}'\n  exit 0\nfi\nexit 1\n`, "utf-8");
+	fs.chmodSync(npmPath, 0o755);
+	process.env.PATH = `${binDir}${path.delimiter}${process.env.PATH ?? ""}`;
 }
 
 function writeMcpFixture(
@@ -510,6 +520,30 @@ describe("buildPiArgs system prompt mode wiring", () => {
 		const extensionArgs = args.filter((arg, index) => args[index - 1] === "--extension");
 		assert.ok(extensionArgs.includes(path.join(packageRoot, "src", "extension.ts")));
 		assert.ok(!extensionArgs.includes("npm:@scope/named-ext"));
+	});
+
+	it("resolves globally installed named extension packages", () => {
+		const fixture = createMcpFixture();
+		const globalNpmRoot = path.join(fixture.root, "global-node-modules");
+		installFakeNpmRoot(fixture.root, globalNpmRoot);
+		const packageRoot = path.join(globalNpmRoot, "pi-intercom");
+		writeJson(path.join(packageRoot, "package.json"), {
+			name: "pi-intercom",
+			pi: { extensions: ["./src/index.ts"] },
+		});
+
+		const { args } = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			inheritProjectContext: false,
+			inheritSkills: false,
+			extensions: ["npm:pi-intercom"],
+		});
+
+		const extensionArgs = args.filter((arg, index) => args[index - 1] === "--extension");
+		assert.ok(extensionArgs.includes(path.join(packageRoot, "src", "index.ts")));
+		assert.ok(!extensionArgs.includes("npm:pi-intercom"));
 	});
 
 	it("keeps unresolved extension refs unchanged so Pi can report the final load error", () => {

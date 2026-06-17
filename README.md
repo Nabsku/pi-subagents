@@ -488,7 +488,7 @@ extensions:
 extensions: pi-intercom, npm:@scope/ext-package, /abs/path/to/ext-a.ts, ./local-ext.ts
 ```
 
-Named entries resolve installed Pi packages from the user agent directory (for example `~/.pi/agent/npm/node_modules/<name>`). Packages with `pi.extensions` expand to those extension entry files; path entries are passed through unchanged.
+Named entries resolve installed Pi packages from the user agent directory or global npm root (for example `~/.pi/agent/npm/node_modules/<name>` or the directory returned by `npm root -g`). Packages with `pi.extensions` expand to those extension entry files; path entries are passed through unchanged.
 
 When `extensions` is present, it takes precedence over extension paths implied by `tools` entries.
 

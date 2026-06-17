@@ -235,7 +235,8 @@ function extensionSandboxAllowsIntercom(extensions: string[] | undefined, extens
 	const intercomDir = path.resolve(extensionDir).replaceAll("\\", "/").toLowerCase();
 	for (const entry of extensions) {
 		const normalized = entry.trim().replaceAll("\\", "/").toLowerCase();
-		if (normalized === "pi-intercom") return true;
+		const npmPackageName = normalized.startsWith("npm:") ? parseNpmPackageName(normalized) : undefined;
+		if (normalized === "pi-intercom" || npmPackageName === PI_INTERCOM_PACKAGE_NAME) return true;
 		if (normalized === intercomDir) return true;
 		if (normalized.startsWith(`${intercomDir}/`)) return true;
 		if (normalized.endsWith("/pi-intercom")) return true;

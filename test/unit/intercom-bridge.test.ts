@@ -96,10 +96,13 @@ describe("diagnoseIntercomBridge", () => {
 	it("reports inactive and unavailable when pi-intercom is missing", () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-intercom-diagnostic-test-"));
 		try {
+			const agentDir = path.join(tempDir, "agent");
 			const diagnostic = diagnoseIntercomBridge({
 				config: { mode: "always" },
 				context: "fresh",
 				orchestratorTarget: "main",
+				agentDir,
+				globalNpmRoot: null,
 				extensionDir: path.join(tempDir, "missing-pi-intercom"),
 				configPath: path.join(tempDir, "config.json"),
 			});
@@ -339,6 +342,18 @@ describe("applyIntercomBridgeToAgent", () => {
 		assert.equal(second.systemPrompt, first.systemPrompt);
 	});
 
+	it("injects when extension sandbox allowlists npm-prefixed pi-intercom", () => {
+		const updated = applyIntercomBridgeToAgent(makeAgent({ tools: ["read"], extensions: ["npm:pi-intercom"] }), activeBridge);
+		assert.deepEqual(updated.tools, ["read", "intercom", "contact_supervisor"]);
+		assert.match(updated.systemPrompt, /Intercom orchestration channel:/);
+	});
+
+	it("injects when extension sandbox allowlists versioned npm-prefixed pi-intercom", () => {
+		const updated = applyIntercomBridgeToAgent(makeAgent({ tools: ["read"], extensions: ["npm:pi-intercom@1.2.3"] }), activeBridge);
+		assert.deepEqual(updated.tools, ["read", "intercom", "contact_supervisor"]);
+		assert.match(updated.systemPrompt, /contact_supervisor/);
+	});
+
 	it("does not inject when extension sandbox excludes intercom", () => {
 		const agent = makeAgent({ tools: ["read"], extensions: ["/tmp/other-extension/index.ts"] });
 		const updated = applyIntercomBridgeToAgent(agent, activeBridge);
@@ -347,6 +362,12 @@ describe("applyIntercomBridgeToAgent", () => {
 
 	it("does not treat not-pi-intercom paths as allowed", () => {
 		const agent = makeAgent({ tools: ["read"], extensions: ["/tmp/not-pi-intercom/index.ts"] });
+		const updated = applyIntercomBridgeToAgent(agent, activeBridge);
+		assert.equal(updated, agent);
+	});
+
+	it("does not treat other npm-prefixed packages as allowed", () => {
+		const agent = makeAgent({ tools: ["read"], extensions: ["npm:not-pi-intercom"] });
 		const updated = applyIntercomBridgeToAgent(agent, activeBridge);
 		assert.equal(updated, agent);
 	});

@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -89,6 +90,33 @@ function isPathLikeExtensionRef(ref: string): boolean {
 		|| ref.endsWith(".cjs");
 }
 
+function isSafePackagePath(value: string): boolean {
+	return value.length > 0
+		&& !path.isAbsolute(value)
+		&& value.split(/[\\/]/).every((part) => part.length > 0 && part !== "." && part !== "..");
+}
+
+function parseNpmPackageName(ref: string): string | undefined {
+	const spec = ref.startsWith("npm:") ? ref.slice("npm:".length).trim() : ref.trim();
+	if (!spec) return undefined;
+	const match = spec.match(/^(@?[^@]+(?:\/[^@]+)?)(?:@(.+))?$/);
+	const packageName = match?.[1] ?? spec;
+	return isSafePackagePath(packageName) ? packageName : undefined;
+}
+
+let cachedGlobalNpmRoot: string | null | undefined;
+
+function getGlobalNpmRoot(): string | null {
+	if (cachedGlobalNpmRoot !== undefined) return cachedGlobalNpmRoot;
+	try {
+		cachedGlobalNpmRoot = execSync("npm root -g", { encoding: "utf-8", timeout: 5000 }).trim();
+		return cachedGlobalNpmRoot;
+	} catch {
+		cachedGlobalNpmRoot = null;
+		return null;
+	}
+}
+
 function readJsonBestEffort(filePath: string): unknown {
 	try {
 		return JSON.parse(fs.readFileSync(filePath, "utf-8"));
@@ -108,7 +136,7 @@ function packageExtensionEntries(packageRoot: string): string[] {
 }
 
 function resolvePackageExtensionRef(ref: string): string[] | null {
-	const packageName = ref.startsWith("npm:") ? ref.slice("npm:".length) : ref;
+	const packageName = parseNpmPackageName(ref);
 	if (!packageName || isPathLikeExtensionRef(packageName)) return null;
 
 	const agentDir = getAgentDir();
@@ -125,6 +153,18 @@ function resolvePackageExtensionRef(ref: string): string[] | null {
 			return entries.map((entry) => path.resolve(packageRoot, entry));
 		}
 		return [packageRoot];
+	}
+
+	const globalNpmRoot = getGlobalNpmRoot();
+	if (globalNpmRoot) {
+		const packageRoot = path.join(globalNpmRoot, packageName);
+		if (fs.existsSync(packageRoot)) {
+			const entries = packageExtensionEntries(packageRoot);
+			if (entries.length > 0) {
+				return entries.map((entry) => path.resolve(packageRoot, entry));
+			}
+			return [packageRoot];
+		}
 	}
 	return null;
 }
