@@ -1194,6 +1194,29 @@ export interface ScheduledRunsConfig {
 	maxPending?: number;
 }
 
+export type TerminalBackend = "headless" | "herdr";
+export type HerdrPlacement = "tab" | "pane";
+export type TerminalSplitDirection = "right" | "down";
+export type TerminalFallback = "error" | "headless";
+
+export interface TerminalConfig {
+	backend?: TerminalBackend;
+	placement?: HerdrPlacement;
+	splitDirection?: TerminalSplitDirection;
+	focus?: boolean;
+	closeOnExit?: boolean;
+	fallback?: TerminalFallback;
+}
+
+export interface ResolvedTerminalConfig {
+	backend: TerminalBackend;
+	placement: HerdrPlacement;
+	splitDirection: TerminalSplitDirection;
+	focus: boolean;
+	closeOnExit: boolean;
+	fallback: TerminalFallback;
+}
+
 export interface ExtensionConfig {
 	asyncByDefault?: boolean;
 	/** Show the above-editor async runs widget. Defaults to true. */
@@ -1221,6 +1244,7 @@ export interface ExtensionConfig {
 	intercomBridge?: IntercomBridgeConfig;
 	proactiveSkillSubagents?: ProactiveSkillSubagentsConfig | false;
 	scheduledRuns?: ScheduledRunsConfig;
+	terminal?: TerminalConfig;
 }
 
 // ============================================================================

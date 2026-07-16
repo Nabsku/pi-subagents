@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionConfig } from "../shared/types.ts";
 import { getAgentDir } from "../shared/utils.ts";
+import { resolveTerminalConfig } from "../runs/shared/terminal-config.ts";
 
 export function getConfigPath(): string {
 	return path.join(getAgentDir(), "extensions", "subagent", "config.json");
@@ -36,4 +37,8 @@ export function loadConfig(): ExtensionConfig {
 		console.error(`Failed to load subagent config from '${configPath}':`, error);
 	}
 	return {};
+}
+
+export function loadResolvedTerminalConfig() {
+	return resolveTerminalConfig(loadConfig().terminal);
 }
