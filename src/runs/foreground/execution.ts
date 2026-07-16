@@ -2,7 +2,6 @@
  * Core execution logic for running subagents
  */
 
-import { spawn } from "node:child_process";
 import { existsSync, unlinkSync } from "node:fs";
 import * as path from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
@@ -49,6 +48,7 @@ import { buildSkillInjection, resolveSkillsWithFallback } from "../../agents/ski
 import { buildAgentMemoryInjection } from "../../agents/agent-memory.ts";
 import { evaluateCompletionMutationGuard } from "../shared/completion-guard.ts";
 import { getPiSpawnCommand } from "../shared/pi-spawn.ts";
+import { createChildProcessBackend, type ChildProcessBackend } from "../shared/process-backend.ts";
 import { createJsonlWriter } from "../../shared/jsonl-writer.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
 import { applyThinkingSuffix, buildPiArgs, cleanupTempDir } from "../shared/pi-args.ts";
@@ -86,6 +86,10 @@ import {
 
 const artifactOutputByResult = new WeakMap<SingleResult, string>();
 const acceptanceOutputByResult = new WeakMap<SingleResult, string>();
+
+type RunSyncOptionsWithBackend = RunSyncOptions & {
+	childProcessBackend?: ChildProcessBackend;
+};
 
 function emptyUsage(): Usage {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
@@ -314,15 +318,36 @@ async function runSingleAttempt(
 	}
 	const spawnEnv = { ...process.env, ...sharedEnv, ...getSubagentDepthEnv(options.maxSubagentDepth) };
 	let observedMutationAttempt = false;
+	const spawnSpec = getPiSpawnCommand(args);
+	const childProcessBackend = (options as RunSyncOptionsWithBackend).childProcessBackend ?? createChildProcessBackend();
+	const childCwd = options.cwd ?? runtimeCwd;
+	let proc: Awaited<ReturnType<ChildProcessBackend["launch"]>>;
+	try {
+		proc = await childProcessBackend.launch({
+			command: spawnSpec.command,
+			args: spawnSpec.args,
+			cwd: childCwd,
+			env: spawnEnv,
+			label: agent.name,
+			runId: options.runId,
+			childIndex: options.index ?? 0,
+		});
+	} catch (error) {
+		cleanupTempDir(tempDir);
+		result.exitCode = 1;
+		result.error = error instanceof Error ? error.message : String(error);
+		progress.status = "failed";
+		progress.error = result.error;
+		progress.durationMs = Date.now() - startTime;
+		result.progressSummary = {
+			toolCount: progress.toolCount,
+			tokens: progress.tokens,
+			durationMs: progress.durationMs,
+		};
+		return result;
+	}
 
 	const exitCode = await new Promise<number>((resolve) => {
-		const spawnSpec = getPiSpawnCommand(args);
-		const proc = spawn(spawnSpec.command, spawnSpec.args, {
-			cwd: options.cwd ?? runtimeCwd,
-			env: spawnEnv,
-			stdio: ["ignore", "pipe", "pipe"],
-			windowsHide: true,
-		});
 		const jsonlWriter = createJsonlWriter(shared.jsonlPath, proc.stdout);
 		let processClosed = false;
 		let settled = false;
@@ -875,7 +900,7 @@ async function runSingleAttempt(
 			childExited = true;
 			clearFinalDrainTimers();
 		});
-		proc.on("close", (code, signal) => {
+		const handleClose = (code: number | null, signal: NodeJS.Signals | null) => {
 			clearFinalDrainTimers();
 			clearStdioGuard();
 			void jsonlWriter.close().catch(() => {
@@ -944,8 +969,8 @@ async function runSingleAttempt(
 			if (!result.error && closeError) result.error = closeError;
 			processClosed = true;
 			finish(finalCode);
-		});
-		proc.on("error", (error) => {
+		};
+		const handleError = (error: Error) => {
 			clearFinalDrainTimers();
 			clearStdioGuard();
 			void jsonlWriter.close().catch(() => {
@@ -958,13 +983,17 @@ async function runSingleAttempt(
 				result.error = error instanceof Error ? error.message : String(error);
 			}
 			finish(1);
-		});
+		};
+		proc.on("close", handleClose);
+		proc.on("error", handleError);
 
 		if (options.signal) {
 			const kill = () => {
 				if (processClosed || detached) return;
 				proc.kill("SIGTERM");
-				setTimeout(() => !proc.killed && proc.kill("SIGKILL"), 3000);
+				setTimeout(() => {
+					if (!processClosed && !detached) proc.kill("SIGKILL");
+				}, 3000);
 			};
 			if (options.signal.aborted) kill();
 			else {

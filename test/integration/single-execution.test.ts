@@ -210,14 +210,22 @@ interface ExecutorModule {
 	};
 }
 
+interface ProcessBackendModule {
+	createHeadlessProcessBackend(deps?: unknown): {
+		launch(request: unknown): Promise<unknown>;
+	};
+}
+
 const execution = await tryImport<ExecutionModule>("./src/runs/foreground/execution.ts");
 const utils = await tryImport<UtilsModule>("./src/shared/utils.ts");
 const executorMod = await tryImport<ExecutorModule>("./src/runs/foreground/subagent-executor.ts");
+const processBackendMod = await tryImport<ProcessBackendModule>("./src/runs/shared/process-backend.ts");
 const available = !!(execution && utils);
 
 const runSync = execution?.runSync;
 const getFinalOutput = utils?.getFinalOutput;
 const createSubagentExecutor = executorMod?.createSubagentExecutor;
+const createHeadlessProcessBackend = processBackendMod?.createHeadlessProcessBackend;
 
 function escapeRegExp(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -317,6 +325,62 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 
 		const output = getFinalOutput(result.messages);
 		assert.equal(output, "Hello from mock agent");
+	});
+
+	it("routes foreground launch through the child process backend with exact command, args, cwd, and env", { skip: !createHeadlessProcessBackend ? "process backend not importable" : undefined }, async () => {
+		mockPi.onCall({ echoEnv: ["PI_SUBAGENT_RUN_ID", "PI_SUBAGENT_CHILD_INDEX"] });
+		const agents = makeAgentConfigs(["echo"]);
+		const launched: unknown[] = [];
+		const headless = createHeadlessProcessBackend!();
+		const backend = {
+			async launch(request: unknown) {
+				launched.push(request);
+				return headless.launch(request);
+			},
+		};
+
+		const result = await runSync(tempDir, agents, "echo", "Say hello through backend", {
+			runId: "backend-route-run",
+			index: 7,
+			cwd: tempDir,
+			acceptance: false,
+			childProcessBackend: backend,
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(launched.length, 1);
+		const request = launched[0] as { command?: string; args?: string[]; cwd?: string; env?: Record<string, string>; label?: string; runId?: string; childIndex?: number };
+		assert.equal(path.basename(request.command ?? ""), "pi");
+		assert.deepEqual(request.args?.slice(0, 3), ["--mode", "json", "-p"]);
+		assert.equal(request.cwd, tempDir);
+		assert.equal(request.env?.PI_SUBAGENT_RUN_ID, "backend-route-run");
+		assert.equal(request.env?.PI_SUBAGENT_CHILD_INDEX, "7");
+		assert.equal(request.runId, "backend-route-run");
+		assert.equal(request.childIndex, 7);
+		assert.match(request.label ?? "", /echo/);
+		assert.deepEqual(JSON.parse(getFinalOutput(result.messages)), {
+			PI_SUBAGENT_RUN_ID: "backend-route-run",
+			PI_SUBAGENT_CHILD_INDEX: "7",
+		});
+	});
+
+	it("settles foreground runs when the child process backend launch rejects", async () => {
+		const agents = makeAgentConfigs(["echo"]);
+		const backend = {
+			async launch() {
+				throw new Error("backend launch failed");
+			},
+		};
+
+		const result = await runSync(tempDir, agents, "echo", "Do not hang on launch failure", {
+			acceptance: false,
+			childProcessBackend: backend,
+		});
+
+		assert.equal(result.exitCode, 1);
+		assert.match(result.error ?? "", /backend launch failed/);
+		assert.equal(result.progress.status, "failed");
+		assert.equal(mockPi.callCount(), 0);
 	});
 
 	it("treats action='single' with execution fields as single execution", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {

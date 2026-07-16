@@ -1,14 +1,18 @@
-import type { ChildProcess } from "node:child_process";
-
 interface PostExitStdioGuardOptions {
 	idleMs: number;
 	hardMs: number;
 }
 
+interface DestroyableReadableStdio {
+	on(event: "data", listener: (...args: any[]) => void): this;
+	on(event: "end", listener: () => void): this;
+	destroy(error?: Error): void;
+}
+
 interface ChildWithPipedStdio {
-	stdout: ChildProcess["stdout"];
-	stderr: ChildProcess["stderr"];
-	on: ChildProcess["on"];
+	stdout?: DestroyableReadableStdio | null;
+	stderr?: DestroyableReadableStdio | null;
+	on(event: "exit" | "close" | "error", listener: (...args: any[]) => void): unknown;
 }
 
 interface ChildWithKill {
