@@ -5,6 +5,7 @@ import { isAsyncAvailable } from "../runs/background/async-execution.ts";
 import { formatSpawnBudgetSummary, getSpawnBudgetSnapshot } from "../runs/shared/spawn-budget.ts";
 import { diagnoseIntercomBridge, type IntercomBridgeDiagnostic } from "../intercom/intercom-bridge.ts";
 import { discoverAvailableSkills, type SkillSource } from "../agents/skills.ts";
+import { resolveTerminalConfig } from "../runs/shared/terminal-config.ts";
 import {
 	ASYNC_DIR,
 	CHAIN_RUNS_DIR,
@@ -191,6 +192,20 @@ function formatPermissionSystemSection(): string[] {
 	return lines;
 }
 
+function formatTerminalBackendSection(config: ExtensionConfig): string[] {
+	return lineFromCheck("terminal backend", () => {
+		const resolved = resolveTerminalConfig(config.terminal);
+		return [
+			`- backend: ${resolved.backend}`,
+			`- placement: ${resolved.placement}`,
+			`- split direction: ${resolved.splitDirection}`,
+			`- focus: ${resolved.focus}`,
+			`- close on exit: ${resolved.closeOnExit}`,
+			`- fallback: ${resolved.fallback}`,
+		].join("\n");
+	}).split("\n");
+}
+
 export function buildDoctorReport(input: DoctorReportInput): string {
 	const paths = input.paths ?? DEFAULT_PATHS;
 	const deps = { ...DEFAULT_DEPS, ...input.deps };
@@ -216,6 +231,9 @@ export function buildDoctorReport(input: DoctorReportInput): string {
 		"",
 		"Permission system",
 		...formatPermissionSystemSection(),
+		"",
+		"Terminal backend",
+		...formatTerminalBackendSection(input.config),
 		"",
 		"Intercom bridge",
 		...lineFromCheck("intercom bridge", () => formatIntercomDiagnostic(deps.diagnoseIntercomBridge({

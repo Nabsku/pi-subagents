@@ -12,6 +12,7 @@ export interface ChildLaunchRequest {
 	label: string;
 	runId: string;
 	childIndex: number;
+	parentWorkspaceId?: string;
 }
 
 export interface TerminalHandle {
@@ -77,6 +78,7 @@ function assertNoNul(value: string | undefined, label: string): void {
 function validateLaunchRequest(request: ChildLaunchRequest): void {
 	assertNoNul(request.command, "command");
 	assertNoNul(request.cwd, "cwd");
+	assertNoNul(request.parentWorkspaceId, "parentWorkspaceId");
 	request.args.forEach((arg, index) => assertNoNul(arg, `args[${index}]`));
 	for (const [key, value] of Object.entries(request.env)) {
 		assertNoNul(key, "env key");

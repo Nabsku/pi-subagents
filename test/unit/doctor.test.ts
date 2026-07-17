@@ -48,6 +48,41 @@ function makeChain(name: string, source: ChainConfig["source"]): ChainConfig {
 }
 
 describe("buildDoctorReport", () => {
+	it("reports resolved Herdr terminal configuration", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-doctor-herdr-"));
+		try {
+			const report = buildDoctorReport({
+				cwd: root,
+				config: { terminal: { backend: "herdr", placement: "tab", focus: false, closeOnExit: false, fallback: "error" } },
+				state: makeState(root),
+				paths: {
+					tempRootDir: root,
+					asyncDir: root,
+					resultsDir: root,
+					chainRunsDir: root,
+				},
+				deps: {
+					isAsyncAvailable: () => true,
+					discoverAgentsAll: () => ({
+						builtin: [], package: [], user: [], project: [], chains: [], packageErrors: [],
+						userDir: root, projectDir: root, userChainDir: root, projectChainDir: root,
+						userSettingsPath: path.join(root, "settings.json"), projectSettingsPath: path.join(root, "settings.json"),
+					}),
+					discoverAvailableSkills: () => [],
+					diagnoseIntercomBridge: () => ({ active: false, mode: "off", wantsIntercom: false, supervisorChannelAvailable: true, extensionDir: "native" }),
+				},
+			});
+
+			assert.match(report, /Terminal backend/);
+			assert.match(report, /- backend: herdr/);
+			assert.match(report, /- placement: tab/);
+			assert.match(report, /- focus: false/);
+			assert.match(report, /- fallback: error/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("formats a bounded successful environment summary", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-doctor-success-"));
 		try {
