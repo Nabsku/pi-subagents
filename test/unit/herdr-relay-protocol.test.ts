@@ -5,6 +5,7 @@ import {
 	HERDR_RELAY_MAX_PAYLOAD_BYTES,
 	HERDR_RELAY_PROTOCOL_VERSION,
 	HerdrRelayProtocolError,
+	createHerdrRelayAuthProof,
 	createHerdrRelayReader,
 	encodeHerdrRelayFrame,
 	type HerdrRelayFrame,
@@ -23,13 +24,36 @@ function frame(overrides: Partial<HerdrRelayFrame> = {}): HerdrRelayFrame {
 	};
 }
 
+const AUTH_CHALLENGE = Buffer.alloc(32, 0xa7).toString("base64");
+const OTHER_AUTH_CHALLENGE = Buffer.alloc(32, 0xb8).toString("base64");
+const AUTH_CAPABILITY = Buffer.from("capability-secret".padEnd(32, "\0"));
+const BINDING_TERMINAL = { workspaceId: "w1", tabId: "w1:t1", paneId: "w1:p1", terminalId: "term_1" };
+const AUTH_READER_OPTIONS = { expectedNonce: "launch-nonce", expectedCapability: AUTH_CAPABILITY, expectedChallenge: AUTH_CHALLENGE, expectedPid: 123, expectedPgid: 123, expectedTerminal: BINDING_TERMINAL };
+
+function authProof(overrides: { capability?: string | Buffer; challenge?: string; nonce?: string; pid?: number; pgid?: number; terminal?: typeof BINDING_TERMINAL } = {}): string {
+	return createHerdrRelayAuthProof({ capability: overrides.capability ?? AUTH_CAPABILITY, challenge: overrides.challenge ?? AUTH_CHALLENGE, nonce: overrides.nonce ?? "launch-nonce", pid: overrides.pid ?? 123, pgid: overrides.pgid ?? 123, terminal: overrides.terminal ?? BINDING_TERMINAL });
+}
+
+
+function challengeFrame(overrides: Partial<HerdrRelayFrame> = {}): HerdrRelayFrame {
+	return frame({ type: "challenge", seq: 1, pid: 1, nonce: "launch-nonce", challenge: AUTH_CHALLENGE, pgid: undefined, terminal: undefined, ...overrides });
+}
+
 function dataFrame(overrides: Partial<HerdrRelayFrame> = {}): HerdrRelayFrame {
 	return frame({ type: "stdout", seq: 2, payload: Buffer.from("data"), pgid: undefined, terminal: undefined, ...overrides });
 }
 
+function authFrame(overrides: Partial<HerdrRelayFrame> = {}): HerdrRelayFrame {
+	return frame({ type: "auth", seq: 2, pid: 1, nonce: "launch-nonce", proof: authProof(), pgid: undefined, terminal: undefined, ...overrides });
+}
+
+function bindFrame(overrides: Partial<HerdrRelayFrame> = {}): HerdrRelayFrame {
+	return frame({ type: "bind", seq: 3, pid: 123, nonce: "launch-nonce", pgid: 123, terminal: BINDING_TERMINAL, ...overrides });
+}
+
 function rawHeader(header: Record<string, unknown>): Buffer {
 	const body = Buffer.from(JSON.stringify(header), "utf8");
-	const typeCodes: Record<string, number> = { handshake: 1, stdout: 2, stderr: 3, exit: 4, error: 5 };
+	const typeCodes: Record<string, number> = { handshake: 1, stdout: 2, stderr: 3, exit: 4, error: 5, challenge: 6, auth: 7, bind: 8, bound: 9 };
 	const envelope = Buffer.alloc(HERDR_RELAY_HEADER_BYTES);
 	Buffer.from("HRLY").copy(envelope);
 	envelope[4] = HERDR_RELAY_PROTOCOL_VERSION;
@@ -273,5 +297,200 @@ describe("Herdr relay protocol", () => {
 		assert.throws(() => collect([encodeHerdrRelayFrame(frame({ pgid: 0 }))]), /pgid/);
 		assert.throws(() => collect([encodeHerdrRelayFrame(frame()), encodeHerdrRelayFrame(frame({ type: "exit", seq: 2, code: null, signal: null, pgid: undefined, terminal: undefined }))]), /settlement/);
 		assert.throws(() => collect([encodeHerdrRelayFrame(frame()), encodeHerdrRelayFrame(frame({ type: "exit", seq: 2, code: null, signal: "SIGMADEUP" as NodeJS.Signals, pgid: undefined, terminal: undefined }))]), /settlement/);
+	});
+
+	it("requires authenticated immutable binding before any output or settlement", () => {
+		const frames: HerdrRelayFrame[] = [];
+		const reader = createHerdrRelayReader({
+			expectedNonce: "launch-nonce",
+			expectedCapability: AUTH_CAPABILITY,
+			expectedChallenge: AUTH_CHALLENGE,
+			expectedPid: 123,
+			expectedPgid: 123,
+			expectedTerminal: BINDING_TERMINAL,
+			onFrame: (relayFrame) => frames.push(relayFrame),
+		});
+		reader.push(Buffer.concat([
+			encodeHerdrRelayFrame(challengeFrame()),
+			encodeHerdrRelayFrame(authFrame()),
+			encodeHerdrRelayFrame(bindFrame()),
+			encodeHerdrRelayFrame({ version: HERDR_RELAY_PROTOCOL_VERSION, type: "bound", seq: 4, pid: 123, nonce: "launch-nonce", pgid: 123, terminal: BINDING_TERMINAL }),
+			encodeHerdrRelayFrame(dataFrame({ seq: 5, pid: 123, nonce: "launch-nonce", payload: Buffer.from("ok") })),
+			encodeHerdrRelayFrame(frame({ type: "exit", seq: 6, pid: 123, nonce: "launch-nonce", code: 0, signal: null, pgid: undefined, terminal: undefined })),
+		]));
+		assert.deepEqual(frames.map((relayFrame) => relayFrame.type), ["challenge", "auth", "bind", "bound", "stdout", "exit"]);
+
+		const unauthenticated = createHerdrRelayReader({ ...AUTH_READER_OPTIONS, onFrame: () => {} });
+		assert.throws(() => unauthenticated.push(encodeHerdrRelayFrame(bindFrame({ seq: 1 }))), /relay challenge required first/);
+		const unbound = createHerdrRelayReader({ ...AUTH_READER_OPTIONS, onFrame: () => {} });
+		unbound.push(encodeHerdrRelayFrame(challengeFrame()));
+		unbound.push(encodeHerdrRelayFrame(authFrame()));
+		assert.throws(() => unbound.push(encodeHerdrRelayFrame(dataFrame({ seq: 3, pid: 123, nonce: "launch-nonce" }))), /relay binding required before output/);
+	});
+
+	it("rejects wrong capability proof, metadata substitution, replayed auth, and never leaks capability material", () => {
+		assert.throws(
+			() => {
+				const reader = createHerdrRelayReader({ ...AUTH_READER_OPTIONS, onFrame: () => {} });
+				reader.push(encodeHerdrRelayFrame(challengeFrame()));
+				reader.push(encodeHerdrRelayFrame(authFrame({ proof: authProof({ capability: "wrong-secret" }) })));
+			},
+			(error: unknown) => error instanceof HerdrRelayProtocolError && /relay capability proof mismatch/.test(error.message) && !error.message.includes("wrong-secret") && !error.message.includes("capability-secret"),
+		);
+
+		const authenticated = createHerdrRelayReader({ ...AUTH_READER_OPTIONS, onFrame: () => {} });
+		authenticated.push(encodeHerdrRelayFrame(challengeFrame()));
+		authenticated.push(encodeHerdrRelayFrame(authFrame()));
+		assert.throws(() => authenticated.push(encodeHerdrRelayFrame(authFrame({ seq: 3 }))), /duplicate relay auth/);
+
+		const substituted = createHerdrRelayReader({
+			expectedNonce: "launch-nonce",
+			expectedCapability: AUTH_CAPABILITY,
+			expectedChallenge: AUTH_CHALLENGE,
+			expectedPid: 123,
+			expectedPgid: 123,
+			expectedTerminal: BINDING_TERMINAL,
+			onFrame: () => {},
+		});
+		substituted.push(encodeHerdrRelayFrame(challengeFrame()));
+		substituted.push(encodeHerdrRelayFrame(authFrame()));
+		assert.throws(() => substituted.push(encodeHerdrRelayFrame(bindFrame({ terminal: { workspaceId: "w1", tabId: "w1:t9", paneId: "w1:p1", terminalId: "term_1" } }))), /relay terminal mismatch/);
+	});
+
+	it("rejects cross-reader replay and malformed auth frames without putting the secret on wire", () => {
+		const transcript = Buffer.concat([
+			encodeHerdrRelayFrame(challengeFrame()),
+			encodeHerdrRelayFrame(authFrame()),
+			encodeHerdrRelayFrame(bindFrame()),
+			encodeHerdrRelayFrame(bindFrame({ type: "bound", seq: 4 })),
+			encodeHerdrRelayFrame(frame({ type: "exit", seq: 5, pid: 123, nonce: "launch-nonce", code: 0, signal: null, pgid: undefined, terminal: undefined })),
+		]);
+		const accepted: HerdrRelayFrame[] = [];
+		const first = createHerdrRelayReader({ expectedNonce: "launch-nonce", expectedCapability: AUTH_CAPABILITY, expectedChallenge: AUTH_CHALLENGE, expectedPid: 123, expectedPgid: 123, expectedTerminal: BINDING_TERMINAL, onFrame: (relayFrame) => accepted.push(relayFrame) });
+		first.push(transcript);
+		assert.deepEqual(accepted.map((relayFrame) => relayFrame.type), ["challenge", "auth", "bind", "bound", "exit"]);
+
+		const second = createHerdrRelayReader({ expectedNonce: "launch-nonce", expectedCapability: AUTH_CAPABILITY, expectedChallenge: OTHER_AUTH_CHALLENGE, expectedPid: 123, expectedPgid: 123, expectedTerminal: BINDING_TERMINAL, onFrame: () => {} });
+		assert.throws(() => second.push(transcript), /relay challenge mismatch/);
+
+		assert.doesNotMatch(encodeHerdrRelayFrame(authFrame()).toString("utf8"), /capability-secret/);
+		assert.throws(() => encodeHerdrRelayFrame({ ...authFrame(), capability: "capability-secret" } as HerdrRelayFrame), /capability must not be encoded/);
+		const malformed = rawHeader({ version: HERDR_RELAY_PROTOCOL_VERSION, type: "auth", seq: 2, pid: 1, nonce: "launch-nonce", proof: "short" });
+		const malformedReader = createHerdrRelayReader({ ...AUTH_READER_OPTIONS, onFrame: () => {} });
+		malformedReader.push(encodeHerdrRelayFrame(challengeFrame()));
+		assert.throws(() => malformedReader.push(malformed), /invalid relay frame proof/);
+	});
+
+	it("rejects capability on every wire frame model", () => {
+		const variants: HerdrRelayFrame[] = [
+			frame(), challengeFrame(), authFrame(), bindFrame(), bindFrame({ type: "bound", seq: 4 }), dataFrame(), dataFrame({ type: "stderr" }),
+			frame({ type: "exit", code: 0, signal: null, pgid: undefined, terminal: undefined }),
+			frame({ type: "error", message: "safe", pgid: undefined, terminal: undefined }),
+		];
+		for (const variant of variants) {
+			assert.throws(() => encodeHerdrRelayFrame({ ...variant, capability: "wire-secret" } as HerdrRelayFrame), /capability must not be encoded/);
+		}
+		assert.throws(() => collect([rawHeader({ version: HERDR_RELAY_PROTOCOL_VERSION, type: "challenge", seq: 1, pid: 1, nonce: "launch-nonce", challenge: AUTH_CHALLENGE, capability: "wire-secret" })]), /unknown relay frame field/);
+	});
+
+	it("fails authenticated construction closed for every partial authoritative binding tuple", () => {
+		const complete = { expectedNonce: "launch-nonce", expectedCapability: AUTH_CAPABILITY, expectedPid: 123, expectedPgid: 123, expectedTerminal: BINDING_TERMINAL };
+		for (const missing of ["expectedNonce", "expectedCapability", "expectedPid", "expectedPgid", "expectedTerminal"] as const) {
+			const options: Partial<typeof complete> = { ...complete };
+			delete options[missing];
+			assert.throws(() => createHerdrRelayReader({ ...options, onFrame: () => {} }), /complete authoritative relay binding/);
+		}
+		for (const expectedNonce of ["", "   ", "x".repeat(513), 7] as const) {
+			assert.throws(() => createHerdrRelayReader({ ...complete, expectedNonce: expectedNonce as string, onFrame: () => {} }), /expected nonce/);
+		}
+		assert.throws(() => createHerdrRelayReader({ expectedChallenge: AUTH_CHALLENGE, onFrame: () => {} }), /complete authoritative relay binding/);
+		assert.throws(() => createHerdrRelayReader({ expectedCapability: AUTH_CAPABILITY, expectedChallenge: AUTH_CHALLENGE, onFrame: () => {} }), /complete authoritative relay binding/);
+		assert.doesNotThrow(() => createHerdrRelayReader({ ...complete, expectedChallenge: AUTH_CHALLENGE, onFrame: () => {} }));
+	});
+
+	it("rejects peer-selected and cross-launch nonce transcripts in authenticated mode", () => {
+		const peerSelectedTranscript = Buffer.concat([
+			encodeHerdrRelayFrame(challengeFrame({ nonce: "peer-nonce" })),
+			encodeHerdrRelayFrame(authFrame({ nonce: "peer-nonce", proof: authProof({ nonce: "peer-nonce" }) })),
+		]);
+		const authoritative = createHerdrRelayReader({ ...AUTH_READER_OPTIONS, onFrame: () => {} });
+		assert.throws(() => authoritative.push(peerSelectedTranscript), /relay nonce mismatch/);
+
+		const nonceATranscript = Buffer.concat([
+			encodeHerdrRelayFrame(challengeFrame({ nonce: "launch-nonce-a" })),
+			encodeHerdrRelayFrame(authFrame({ nonce: "launch-nonce-a", proof: authProof({ nonce: "launch-nonce-a" }) })),
+		]);
+		const nonceBReader = createHerdrRelayReader({ ...AUTH_READER_OPTIONS, expectedNonce: "launch-nonce-b", onFrame: () => {} });
+		assert.throws(() => nonceBReader.push(nonceATranscript), /relay nonce mismatch/);
+
+		const nonceBProofReader = createHerdrRelayReader({ ...AUTH_READER_OPTIONS, expectedNonce: "launch-nonce-b", onFrame: () => {} });
+		nonceBProofReader.push(encodeHerdrRelayFrame(challengeFrame({ nonce: "launch-nonce-b" })));
+		assert.throws(
+			() => nonceBProofReader.push(encodeHerdrRelayFrame(authFrame({ nonce: "launch-nonce-b", proof: authProof({ nonce: "launch-nonce-a" }) }))),
+			/relay capability proof mismatch/,
+		);
+	});
+
+	it("rejects authenticated PID substitution", () => {
+		const reader = createHerdrRelayReader({ expectedNonce: "launch-nonce", expectedCapability: AUTH_CAPABILITY, expectedPid: 123, expectedPgid: 123, expectedTerminal: BINDING_TERMINAL, expectedChallenge: AUTH_CHALLENGE, onFrame: () => {} });
+		reader.push(encodeHerdrRelayFrame(challengeFrame())); reader.push(encodeHerdrRelayFrame(authFrame()));
+		assert.throws(() => reader.push(encodeHerdrRelayFrame(bindFrame({ pid: 124 }))), /relay PID mismatch/);
+	});
+
+	it("rejects authenticated PGID substitution", () => {
+		const reader = createHerdrRelayReader({ expectedNonce: "launch-nonce", expectedCapability: AUTH_CAPABILITY, expectedPid: 123, expectedPgid: 123, expectedTerminal: BINDING_TERMINAL, expectedChallenge: AUTH_CHALLENGE, onFrame: () => {} });
+		reader.push(encodeHerdrRelayFrame(challengeFrame())); reader.push(encodeHerdrRelayFrame(authFrame()));
+		assert.throws(() => reader.push(encodeHerdrRelayFrame(bindFrame({ pgid: 124 }))), /relay PGID mismatch/);
+	});
+
+	for (const [field, terminal] of [
+		["workspace", { ...BINDING_TERMINAL, workspaceId: "w2" }], ["tab", { ...BINDING_TERMINAL, tabId: "w1:t2" }],
+		["pane", { ...BINDING_TERMINAL, paneId: "w1:p2" }], ["session", { ...BINDING_TERMINAL, terminalId: "term_2" }],
+	] as const) {
+		it(`rejects authenticated ${field} substitution`, () => {
+			const reader = createHerdrRelayReader({ expectedNonce: "launch-nonce", expectedCapability: AUTH_CAPABILITY, expectedPid: 123, expectedPgid: 123, expectedTerminal: BINDING_TERMINAL, expectedChallenge: AUTH_CHALLENGE, onFrame: () => {} });
+			reader.push(encodeHerdrRelayFrame(challengeFrame())); reader.push(encodeHerdrRelayFrame(authFrame()));
+			assert.throws(() => reader.push(encodeHerdrRelayFrame(bindFrame({ terminal }))), /relay terminal mismatch/);
+		});
+	}
+
+	it("rejects BIND to BOUND substitution", () => {
+		const reader = createHerdrRelayReader({ expectedNonce: "launch-nonce", expectedCapability: AUTH_CAPABILITY, expectedPid: 123, expectedPgid: 123, expectedTerminal: BINDING_TERMINAL, expectedChallenge: AUTH_CHALLENGE, onFrame: () => {} });
+		reader.push(Buffer.concat([encodeHerdrRelayFrame(challengeFrame()), encodeHerdrRelayFrame(authFrame()), encodeHerdrRelayFrame(bindFrame())]));
+		assert.throws(() => reader.push(encodeHerdrRelayFrame(bindFrame({ type: "bound", seq: 4, terminal: { ...BINDING_TERMINAL, paneId: "w1:p2" } }))), /relay terminal mismatch|relay binding mismatch/);
+	});
+
+	it("rejects settlement before BOUND", () => {
+		const reader = createHerdrRelayReader({ expectedNonce: "launch-nonce", expectedCapability: AUTH_CAPABILITY, expectedPid: 123, expectedPgid: 123, expectedTerminal: BINDING_TERMINAL, expectedChallenge: AUTH_CHALLENGE, onFrame: () => {} });
+		reader.push(Buffer.concat([encodeHerdrRelayFrame(challengeFrame()), encodeHerdrRelayFrame(authFrame()), encodeHerdrRelayFrame(bindFrame())]));
+		assert.throws(() => reader.push(encodeHerdrRelayFrame(frame({ type: "exit", seq: 4, pid: 123, nonce: "launch-nonce", code: 0, signal: null, pgid: undefined, terminal: undefined }))), /bound acknowledgment required/);
+	});
+
+	it("rejects late AUTH after BOUND", () => {
+		const reader = createHerdrRelayReader({ expectedNonce: "launch-nonce", expectedCapability: AUTH_CAPABILITY, expectedPid: 123, expectedPgid: 123, expectedTerminal: BINDING_TERMINAL, expectedChallenge: AUTH_CHALLENGE, onFrame: () => {} });
+		reader.push(Buffer.concat([encodeHerdrRelayFrame(challengeFrame()), encodeHerdrRelayFrame(authFrame()), encodeHerdrRelayFrame(bindFrame()), encodeHerdrRelayFrame(bindFrame({ type: "bound", seq: 4 }))]));
+		assert.throws(() => reader.push(encodeHerdrRelayFrame(authFrame({ seq: 5 }))), /duplicate relay auth|duplicate relay binding/);
+	});
+
+	it("rejects authenticated protocol version downgrade", () => {
+		const reader = createHerdrRelayReader({ expectedNonce: "launch-nonce", expectedCapability: AUTH_CAPABILITY, expectedPid: 123, expectedPgid: 123, expectedTerminal: BINDING_TERMINAL, expectedChallenge: AUTH_CHALLENGE, onFrame: () => {} });
+		const downgraded = encodeHerdrRelayFrame(challengeFrame()); downgraded[4] = 0;
+		assert.throws(() => reader.push(downgraded), /unsupported relay protocol version/);
+	});
+
+	it("clears retained authentication state on release and terminal EOF failure", () => {
+		const released = createHerdrRelayReader({ ...AUTH_READER_OPTIONS, onFrame: () => {} });
+		const partial = encodeHerdrRelayFrame(challengeFrame()).subarray(0, HERDR_RELAY_HEADER_BYTES + 3);
+		released.push(partial);
+		assert.equal(released.pendingBytes, partial.length);
+		released.release();
+		assert.equal(released.pendingBytes, 0);
+		assert.throws(() => released.push(encodeHerdrRelayFrame(challengeFrame())), /relay reader released/);
+
+		const truncated = createHerdrRelayReader({ ...AUTH_READER_OPTIONS, onFrame: () => {} });
+		truncated.push(partial);
+		assert.throws(() => truncated.end(), /truncated relay frame/);
+		assert.equal(truncated.pendingBytes, 0);
+		assert.throws(() => truncated.push(encodeHerdrRelayFrame(challengeFrame())), /truncated relay frame/);
 	});
 });

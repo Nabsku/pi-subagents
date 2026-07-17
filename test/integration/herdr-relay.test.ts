@@ -3,7 +3,7 @@ import { once } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
 import { createHerdrRelayManagedChild } from "../../src/runs/shared/herdr-relay.ts";
-import { HERDR_RELAY_MAX_PAYLOAD_BYTES, HERDR_RELAY_PROTOCOL_VERSION, encodeHerdrRelayFrame, type HerdrRelayFrame } from "../../src/runs/shared/herdr-relay-protocol.ts";
+import { HERDR_RELAY_MAX_PAYLOAD_BYTES, HERDR_RELAY_PROTOCOL_VERSION, createHerdrRelayAuthProof, encodeHerdrRelayFrame, type HerdrRelayFrame } from "../../src/runs/shared/herdr-relay-protocol.ts";
 
 function handshake(overrides: Partial<HerdrRelayFrame> = {}): HerdrRelayFrame {
 	return {
@@ -18,7 +18,71 @@ function handshake(overrides: Partial<HerdrRelayFrame> = {}): HerdrRelayFrame {
 	};
 }
 
+function auth(overrides: Partial<HerdrRelayFrame> = {}): HerdrRelayFrame {
+	return { version: HERDR_RELAY_PROTOCOL_VERSION, type: "auth", seq: 2, pid: 1, nonce: "launch-i", proof: createHerdrRelayAuthProof({ capability: AUTH_CAPABILITY, challenge: AUTH_CHALLENGE, nonce: "launch-i", pid: 710, pgid: 710, terminal: BINDING_TERMINAL }), ...overrides };
+}
+
+
+function bind(overrides: Partial<HerdrRelayFrame> = {}): HerdrRelayFrame {
+	return { version: HERDR_RELAY_PROTOCOL_VERSION, type: "bind", seq: 3, pid: 710, nonce: "launch-i", pgid: 710, terminal: BINDING_TERMINAL, ...overrides };
+}
+
+const AUTH_CHALLENGE = Buffer.alloc(32, 0xc9).toString("base64");
+const AUTH_CAPABILITY = Buffer.from("cap-secret-i".padEnd(32, "\0"));
+const BINDING_TERMINAL = { workspaceId: "w1", tabId: "w1:t1", paneId: "w1:p1", terminalId: "term_i" };
+
+function challenge(overrides: Partial<HerdrRelayFrame> = {}): HerdrRelayFrame {
+	return { version: HERDR_RELAY_PROTOCOL_VERSION, type: "challenge", seq: 1, pid: 1, nonce: "launch-i", challenge: AUTH_CHALLENGE, ...overrides };
+}
+
 describe("Herdr relay reader integration", () => {
+	it("keeps identity and terminal unbound until AUTH/BIND/BOUND completes", async () => {
+		const relay = new PassThrough();
+		const child = createHerdrRelayManagedChild({
+			relay,
+			expectedNonce: "launch-i",
+			expectedCapability: AUTH_CAPABILITY,
+			expectedChallenge: AUTH_CHALLENGE,
+			expectedPid: 710,
+			expectedPgid: 710,
+			expectedTerminal: BINDING_TERMINAL,
+		});
+		assert.deepEqual(child.identity, { nonce: "launch-i", dedicatedProcessGroup: true, platform: process.platform });
+		assert.equal(child.terminal, undefined);
+
+		const stdout: Buffer[] = [];
+		child.stdout.on("data", (chunk) => stdout.push(Buffer.from(chunk)));
+		relay.write(Buffer.concat([
+			encodeHerdrRelayFrame(challenge()),
+			encodeHerdrRelayFrame(auth()),
+			encodeHerdrRelayFrame(bind()),
+			encodeHerdrRelayFrame(bind({ type: "bound", seq: 4 })),
+			encodeHerdrRelayFrame({ version: HERDR_RELAY_PROTOCOL_VERSION, type: "stdout", seq: 5, pid: 710, nonce: "launch-i", payload: Buffer.from("bound-output") }),
+		]));
+		relay.end(encodeHerdrRelayFrame({ version: HERDR_RELAY_PROTOCOL_VERSION, type: "exit", seq: 6, pid: 710, nonce: "launch-i", code: 0, signal: null }));
+
+		const [code] = await once(child, "close") as [number | null, NodeJS.Signals | null];
+		assert.equal(code, 0);
+		assert.deepEqual(child.identity, { nonce: "launch-i", pid: 710, processGroupId: 710, dedicatedProcessGroup: true, platform: process.platform });
+		assert.deepEqual(child.terminal, { backend: "herdr", workspaceId: "w1", tabId: "w1:t1", paneId: "w1:p1", terminalId: "term_i", ownsWorkspace: false, ownsTab: false, ownsPane: false });
+		assert.deepEqual(Buffer.concat(stdout), Buffer.from("bound-output"));
+	});
+
+	it("rejects authenticated relay output before binding without leaking capability or output", async () => {
+		const relay = new PassThrough();
+		const child = createHerdrRelayManagedChild({ relay, expectedNonce: "launch-i", expectedCapability: AUTH_CAPABILITY, expectedChallenge: AUTH_CHALLENGE, expectedPid: 710, expectedPgid: 710, expectedTerminal: BINDING_TERMINAL });
+		relay.write(Buffer.concat([
+			encodeHerdrRelayFrame(challenge()),
+			encodeHerdrRelayFrame(auth()),
+			encodeHerdrRelayFrame({ version: HERDR_RELAY_PROTOCOL_VERSION, type: "stdout", seq: 3, pid: 710, nonce: "launch-i", payload: Buffer.from("secret-before-bound") }),
+		]));
+
+		await once(child, "close");
+		assert.equal(relay.destroyed, true);
+		assert.match(child.lastError?.message ?? "", /relay binding required before output/);
+		assert.doesNotMatch(child.lastError?.message ?? "", /cap-secret-i|secret-before-bound/);
+	});
+
 	it("routes byte-accurate stdout and stderr frames to distinct streams in per-channel order and exposes handshake identity", async () => {
 		const relay = new PassThrough();
 		const child = createHerdrRelayManagedChild({ relay, expectedNonce: "nonce-i", expectedPid: 700 });

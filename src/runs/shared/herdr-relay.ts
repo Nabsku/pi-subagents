@@ -1,12 +1,16 @@
 import { EventEmitter } from "node:events";
 import { PassThrough, type Readable } from "node:stream";
 import type { ManagedChild, TerminalHandle } from "./process-backend.ts";
-import { createHerdrRelayReader, type HerdrRelayFrame } from "./herdr-relay-protocol.ts";
+import { createHerdrRelayReader, type HerdrRelayFrame, type HerdrRelayTerminalMetadata } from "./herdr-relay-protocol.ts";
 
 export interface HerdrRelayManagedChildOptions {
 	relay: Readable & { destroy(error?: Error): void; pause(): unknown; resume(): unknown };
 	expectedNonce: string;
+	expectedCapability?: Buffer;
+	expectedChallenge?: string;
 	expectedPid?: number;
+	expectedPgid?: number;
+	expectedTerminal?: HerdrRelayTerminalMetadata;
 }
 
 export interface HerdrRelayManagedChild extends ManagedChild {
@@ -37,16 +41,20 @@ class RelayManagedChild extends EventEmitter implements HerdrRelayManagedChild {
 	constructor(options: HerdrRelayManagedChildOptions) {
 		super();
 		this.relay = options.relay;
-		this.pid = options.expectedPid;
+		this.pid = options.expectedCapability === undefined ? options.expectedPid : undefined;
 		this.identity = {
 			nonce: options.expectedNonce,
-			...(options.expectedPid === undefined ? {} : { pid: options.expectedPid }),
+			...(options.expectedCapability !== undefined || options.expectedPid === undefined ? {} : { pid: options.expectedPid }),
 			dedicatedProcessGroup: true,
 			platform: process.platform,
 		};
 		this.reader = createHerdrRelayReader({
 			expectedNonce: options.expectedNonce,
+			expectedCapability: options.expectedCapability,
+			expectedChallenge: options.expectedChallenge,
 			expectedPid: options.expectedPid,
+			expectedPgid: options.expectedPgid,
+			expectedTerminal: options.expectedTerminal,
 			onFrame: (frame) => this.handleFrame(frame),
 		});
 		this.relay.on("data", this.onData);
@@ -61,6 +69,7 @@ class RelayManagedChild extends EventEmitter implements HerdrRelayManagedChild {
 	async releaseTransport(): Promise<void> {
 		if (this.released) return;
 		this.released = true;
+		this.reader.release();
 		this.detachRelayListeners();
 		this.relay.destroy();
 		this.stdout.destroy();
@@ -105,7 +114,7 @@ class RelayManagedChild extends EventEmitter implements HerdrRelayManagedChild {
 
 	private handleFrame(frame: HerdrRelayFrame): boolean | void {
 		if (this.closed || this.protocolFailed) return;
-		if (frame.type === "handshake") {
+		if (frame.type === "handshake" || frame.type === "bound") {
 			this.pid = frame.pid;
 			this.identity = {
 				nonce: frame.nonce,
