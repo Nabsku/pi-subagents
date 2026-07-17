@@ -402,6 +402,7 @@ export function createHerdrRelayReader(options: HerdrRelayReaderOptions): HerdrR
 			if (expectedPid !== undefined && (frame.type === "handshake" || frame.type === "bind" || frame.type === "bound" || boundSeen) && frame.pid !== expectedPid) protocolError("relay PID mismatch");
 			if (frame.type === "handshake") {
 				if (handshakeSeen) protocolError("duplicate relay handshake");
+				if (frame.pid !== frame.pgid) protocolError("relay child must lead its dedicated process group");
 				handshakeSeen = true;
 				boundPid = frame.pid;
 				boundNonce = frame.nonce;
@@ -422,6 +423,7 @@ export function createHerdrRelayReader(options: HerdrRelayReaderOptions): HerdrR
 			}
 			if (frame.type === "bind" || frame.type === "bound") {
 				if (expectedPgid !== undefined && frame.pgid !== expectedPgid) protocolError("relay PGID mismatch");
+				if (frame.pid !== frame.pgid) protocolError("relay child must lead its dedicated process group");
 				if (!terminalEquals(frame.terminal, expectedTerminal)) protocolError("relay terminal mismatch");
 				if (frame.type === "bind") {
 					bindSeen = true;

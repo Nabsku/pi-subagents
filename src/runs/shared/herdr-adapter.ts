@@ -12,7 +12,7 @@ const TERMINAL_ID = /^term_[A-Za-z0-9_-]+$/;
 const HERDR_PROTOCOL = 16;
 const HERDR_VERSION = "0.7.4";
 const DEFAULT_TIMEOUT_MS = 2_000;
-const DEFAULT_MAX_OUTPUT_BYTES = 128 * 1024;
+const DEFAULT_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_LABEL_CHARS = 48;
 
 export type HerdrTerminalHandle = TerminalHandle;
@@ -153,10 +153,17 @@ export class HerdrAdapter {
 		if (schema.schema_version !== 1) {
 			throw new Error("Herdr incompatible schema_version: expected 1");
 		}
-		for (const key of ["request", "response", "event"]) {
-			if (!schema[key] || typeof schema[key] !== "object") throw new Error(`Herdr schema missing ${key}`);
+		const schemaRecords = schema.schemas && typeof schema.schemas === "object" && !Array.isArray(schema.schemas)
+			? schema.schemas as Record<string, unknown>
+			: schema;
+		for (const key of ["request", "event"]) {
+			if (!schemaRecords[key] || typeof schemaRecords[key] !== "object") throw new Error(`Herdr schema missing ${key}`);
 		}
-		if (schema.version !== HERDR_VERSION) {
+		if ((!schemaRecords.response || typeof schemaRecords.response !== "object") && (!schemaRecords.success_response || typeof schemaRecords.success_response !== "object")) {
+			throw new Error("Herdr schema missing response");
+		}
+		const version = schema.version ?? (/herdr\s+(\S+)/i.exec((await this.run(["--version"])).stdout)?.[1]);
+		if (version !== HERDR_VERSION) {
 			throw new Error(`Herdr incompatible version: expected Herdr v${HERDR_VERSION}`);
 		}
 		return { protocol: HERDR_PROTOCOL, version: HERDR_VERSION, schemaVersion: 1 };
@@ -187,6 +194,12 @@ export class HerdrAdapter {
 		let payload: Record<string, unknown>;
 		try {
 			payload = parseJson((await this.run(argv, { cwd: request.cwd, env: request.env })).stdout, "start");
+			if (payload.result && typeof payload.result === "object" && !Array.isArray(payload.result)) {
+				const result = payload.result as Record<string, unknown>;
+				if (result.agent && typeof result.agent === "object" && !Array.isArray(result.agent)) {
+					payload = result.agent as Record<string, unknown>;
+				}
+			}
 			const workspaceId = stringField(payload, "workspace_id", WORKSPACE_ID, "start")!;
 			const tabId = stringField(payload, "tab_id", TAB_ID, "start")!;
 			const paneId = stringField(payload, "pane_id", PANE_ID, "start")!;

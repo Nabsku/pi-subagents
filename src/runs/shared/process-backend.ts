@@ -1,8 +1,16 @@
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { Readable } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
+import { EventEmitter } from "node:events";
+import { createServer, type Server, type Socket } from "node:net";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ResolvedTerminalConfig } from "../../shared/types.ts";
 import { DEFAULT_TERMINAL_CONFIG } from "./terminal-config.ts";
+import { HerdrAdapter, type HerdrTerminalHandle } from "./herdr-adapter.ts";
+import { createHerdrRelayManagedChild, type HerdrRelayManagedChild } from "./herdr-relay.ts";
 
 export interface ChildLaunchRequest {
 	command: string;
@@ -59,8 +67,13 @@ export type SpawnLike = (command: string, args: readonly string[], options: Spaw
 
 export interface ProcessBackendDeps {
 	spawn?: SpawnLike;
+	processKill?: typeof process.kill;
 	platform?: NodeJS.Platform;
 	herdrProbe?: () => unknown;
+	herdrAdapter?: Pick<HerdrAdapter, "startChild" | "close">;
+	herdrRunnerPath?: string;
+	herdrReadinessTimeoutMs?: number;
+	onHerdrIdentityReady?: () => void;
 }
 
 function emptyDestroyableStream(): NodeJS.ReadableStream & { destroy(error?: Error): void } {
@@ -157,9 +170,258 @@ class HeadlessProcessBackend implements ChildProcessBackend {
 	}
 }
 
-class UnsupportedHerdrBackend implements ChildProcessBackend {
-	async launch(_request: ChildLaunchRequest): Promise<ManagedChild> {
-		throw new Error("Herdr terminal backend is not implemented in this slice");
+class HerdrManagedChild extends EventEmitter implements ManagedChild {
+	pid?: number;
+	identity: LaunchIdentity;
+	readonly stdout = new PassThrough();
+	readonly stderr = new PassThrough();
+	terminal?: TerminalHandle;
+	private socket?: Socket;
+	private relayChild?: HerdrRelayManagedChild;
+	private released = false;
+	private closed = false;
+	private readonly server: Server;
+	private readonly socketPath: string;
+	private readonly adapter: Pick<HerdrAdapter, "close">;
+	private readonly closeOnExit: boolean;
+	private readonly processKill: typeof process.kill;
+	private readonly readiness: Promise<void>;
+	private resolveReadiness!: () => void;
+	private rejectReadiness!: (error: Error) => void;
+	private readinessSettled = false;
+	private readinessSucceeded = false;
+	private readonly launchFailure: Promise<never>;
+	private rejectLaunchFailure!: (error: Error) => void;
+	private launchState: "launching" | "published" | "failed" = "launching";
+	private terminalClose?: Promise<void>;
+	private readonly onIdentityReady?: () => void;
+
+	constructor(
+		server: Server,
+		socketPath: string,
+		adapter: Pick<HerdrAdapter, "close">,
+		closeOnExit: boolean,
+		nonce: string,
+		processKill: typeof process.kill,
+		onIdentityReady?: () => void,
+	) {
+		super();
+		this.server = server;
+		this.socketPath = socketPath;
+		this.adapter = adapter;
+		this.closeOnExit = closeOnExit;
+		this.processKill = processKill;
+		this.onIdentityReady = onIdentityReady;
+		this.identity = { nonce, dedicatedProcessGroup: true, platform: process.platform };
+		this.readiness = new Promise<void>((resolve, reject) => {
+			this.resolveReadiness = resolve;
+			this.rejectReadiness = reject;
+		});
+		void this.readiness.catch(() => {});
+		this.launchFailure = new Promise<never>((_resolve, reject) => {
+			this.rejectLaunchFailure = reject;
+		});
+		void this.launchFailure.catch(() => {});
+		this.server.once("error", (error) => this.fail(new Error(`Herdr relay server error: ${error.message}`)));
+	}
+
+	bindSocket(socket: Socket): void {
+		// This endpoint is an opt-in local development transport, not authentication:
+		// same-user endpoint impersonation is out of scope and production routing stays disabled.
+		if (this.socket) { socket.destroy(); return; }
+		this.socket = socket;
+		const relayChild = createHerdrRelayManagedChild({
+			relay: socket,
+			expectedNonce: this.identity.nonce,
+			onIdentity: ({ pid, pgid }) => {
+				this.pid = pid;
+				this.identity = { ...this.identity, pid, processGroupId: pgid };
+				setImmediate(() => this.resolveReady());
+			},
+		});
+		this.relayChild = relayChild;
+		relayChild.stdout.pipe(this.stdout, { end: false });
+		relayChild.stderr.pipe(this.stderr, { end: false });
+		relayChild.once("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+			if (this.launchState === "published") this.emit("exit", code, signal);
+			else this.rejectLaunch(new Error("Herdr relay child settled before launch completed"));
+		});
+		relayChild.once("close", (code: number | null, signal: NodeJS.Signals | null) => {
+			if (relayChild.lastError) this.fail(relayChild.lastError);
+			else this.finish(code, signal);
+		});
+	}
+
+	setTerminal(handle: HerdrTerminalHandle): void { this.terminal = handle; }
+
+	waitUntilReady(): Promise<void> { return this.readiness; }
+	waitUntilLaunchFailure(): Promise<never> { return this.launchFailure; }
+
+	publish(): void {
+		if (this.launchState !== "launching" || this.closed || this.released) {
+			throw new Error("Herdr relay settled before launch completed");
+		}
+		this.launchState = "published";
+	}
+
+	kill(signal: NodeJS.Signals | number = "SIGTERM"): boolean {
+		const processGroupId = this.identity.processGroupId;
+		if (processGroupId === undefined || this.closed) return false;
+		try {
+			this.processKill(-processGroupId, signal);
+			return true;
+		} catch { return false; }
+	}
+
+	async releaseTransport(): Promise<void> {
+		if (this.released) return;
+		this.released = true;
+		this.rejectReady(new Error("Herdr relay transport released before identity readiness"));
+		this.rejectLaunch(new Error("Herdr relay transport released before launch completed"));
+		await this.relayChild?.releaseTransport();
+		this.socket?.destroy();
+		await new Promise<void>((resolve) => this.server.close(() => resolve()));
+		fs.rmSync(this.socketPath, { force: true });
+		fs.rmSync(path.dirname(this.socketPath), { recursive: true, force: true });
+	}
+
+	async closeTerminal(): Promise<void> {
+		if (!this.terminal) return;
+		this.terminalClose ??= this.adapter.close(this.terminal).then(() => {});
+		await this.terminalClose;
+	}
+
+	private finish(code: number | null, signal: NodeJS.Signals | null): void {
+		if (this.closed) return;
+		if (!this.readinessSettled) this.rejectReady(new Error("Herdr relay closed before identity readiness"));
+		this.rejectLaunch(new Error("Herdr relay closed before launch completed"));
+		this.closed = true;
+		this.stdout.end();
+		this.stderr.end();
+		void this.releaseTransport().then(async () => {
+			if (this.closeOnExit) await this.closeTerminal();
+			if (this.launchState === "published") this.emit("close", code, signal);
+		}).catch((error) => {
+			if (this.launchState === "published") this.emit("error", error);
+		});
+	}
+
+	private fail(error: Error): void {
+		if (this.closed) return;
+		const launchError = new Error(this.readinessSucceeded
+			? `Herdr relay failed before launch completed: ${error.message}`
+			: `Herdr relay failed before identity readiness: ${error.message}`);
+		this.rejectReady(launchError);
+		const failedBeforePublish = this.launchState !== "published";
+		this.rejectLaunch(launchError);
+		this.closed = true;
+		this.stdout.destroy();
+		this.stderr.destroy();
+		void this.releaseTransport().finally(() => {
+			if (!failedBeforePublish) {
+				this.emit("error", new Error(error.message));
+				this.emit("close", null, null);
+			}
+		});
+	}
+
+	private resolveReady(): void {
+		if (this.readinessSettled || this.launchState !== "launching") return;
+		this.readinessSettled = true;
+		this.readinessSucceeded = true;
+		this.resolveReadiness();
+		try {
+			this.onIdentityReady?.();
+		} catch (error) {
+			const detail = (error instanceof Error ? error.message : String(error))
+				.replace(/[\u0000-\u001f\u007f]+/g, " ")
+				.slice(0, 200) || "unknown error";
+			this.rejectLaunch(new Error(`Herdr identity readiness callback failed: ${detail}`));
+		}
+	}
+
+	private rejectReady(error: Error): void {
+		if (this.readinessSettled) return;
+		this.readinessSettled = true;
+		this.rejectReadiness(error);
+	}
+
+	private rejectLaunch(error: Error): void {
+		if (this.launchState !== "launching") return;
+		this.launchState = "failed";
+		this.rejectLaunchFailure(error);
+	}
+}
+
+class HerdrProcessBackend implements ChildProcessBackend {
+	private readonly adapter: Pick<HerdrAdapter, "startChild" | "close">;
+	private readonly runnerPath: string;
+	private readonly config: ResolvedTerminalConfig;
+	private readonly processKill: typeof process.kill;
+	private readonly readinessTimeoutMs: number;
+	private readonly onIdentityReady?: () => void;
+
+	constructor(config: ResolvedTerminalConfig, deps: ProcessBackendDeps) {
+		this.config = config;
+		this.adapter = deps.herdrAdapter ?? new HerdrAdapter();
+		this.runnerPath = deps.herdrRunnerPath ?? fileURLToPath(new URL("../../../herdr-relay-runner.mjs", import.meta.url));
+		this.processKill = deps.processKill ?? process.kill;
+		this.readinessTimeoutMs = deps.herdrReadinessTimeoutMs ?? 5_000;
+		this.onIdentityReady = deps.onHerdrIdentityReady;
+	}
+
+	async launch(request: ChildLaunchRequest): Promise<ManagedChild> {
+		validateLaunchRequest(request);
+		if (process.platform === "win32") throw new Error("Herdr local pane backend is not supported on Windows");
+		if (this.config.placement !== "tab") throw new Error("Herdr local pane backend currently supports terminal.placement=tab only");
+		if (!fs.existsSync(this.runnerPath)) throw new Error(`Herdr relay runner not found: ${this.runnerPath}`);
+		const deadline = Date.now() + this.readinessTimeoutMs;
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-herdr-"));
+		const socketPath = path.join(root, "relay.sock");
+		const nonce = randomUUID();
+		let managed: HerdrManagedChild;
+		const server = createServer((socket) => managed.bindSocket(socket));
+		await new Promise<void>((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(socketPath, () => { server.off("error", reject); resolve(); });
+		});
+		managed = new HerdrManagedChild(server, socketPath, this.adapter, this.config.closeOnExit, nonce, this.processKill, this.onIdentityReady);
+		let launchFailed = false;
+		let deadlineTimer: NodeJS.Timeout | undefined;
+		try {
+			const deadlinePromise = new Promise<never>((_resolve, reject) => {
+				deadlineTimer = setTimeout(
+					() => reject(new Error("Herdr launch readiness timed out")),
+					Math.max(1, deadline - Date.now()),
+				);
+			});
+			const handlePromise = this.adapter.startChild({
+				...request,
+				command: process.execPath,
+				args: [this.runnerPath, socketPath, nonce, this.config.closeOnExit ? "close" : "retain", request.command, ...request.args],
+			}).then(async (handle) => {
+				if (launchFailed) {
+					await this.adapter.close(handle).catch(() => {});
+					throw new Error("Herdr launch settled before adapter returned an owned terminal");
+				}
+				managed.setTerminal(handle);
+				return handle;
+			});
+			await Promise.race([
+				Promise.all([handlePromise, managed.waitUntilReady()]).then(() => managed.publish()),
+				managed.waitUntilLaunchFailure(),
+				deadlinePromise,
+			]);
+			return managed;
+		} catch (error) {
+			launchFailed = true;
+			await managed.closeTerminal().catch(() => {});
+			await managed.releaseTransport();
+			fs.rmSync(root, { recursive: true, force: true });
+			throw error;
+		} finally {
+			if (deadlineTimer) clearTimeout(deadlineTimer);
+		}
 	}
 }
 
@@ -175,5 +437,5 @@ export function createChildProcessBackend(
 	if (resolved.backend === "headless") {
 		return createHeadlessProcessBackend(deps);
 	}
-	return new UnsupportedHerdrBackend();
+	return new HerdrProcessBackend(resolved, deps);
 }

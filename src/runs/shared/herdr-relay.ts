@@ -11,6 +11,7 @@ export interface HerdrRelayManagedChildOptions {
 	expectedPid?: number;
 	expectedPgid?: number;
 	expectedTerminal?: HerdrRelayTerminalMetadata;
+	onIdentity?: (identity: { pid: number; pgid: number; terminal?: HerdrRelayTerminalMetadata }) => void;
 }
 
 export interface HerdrRelayManagedChild extends ManagedChild {
@@ -37,10 +38,12 @@ class RelayManagedChild extends EventEmitter implements HerdrRelayManagedChild {
 	private stderrBackpressured = false;
 	private terminalCode: number | null = null;
 	private terminalSignal: NodeJS.Signals | null = null;
+	private readonly onIdentity?: HerdrRelayManagedChildOptions["onIdentity"];
 
 	constructor(options: HerdrRelayManagedChildOptions) {
 		super();
 		this.relay = options.relay;
+		this.onIdentity = options.onIdentity;
 		this.pid = options.expectedCapability === undefined ? options.expectedPid : undefined;
 		this.identity = {
 			nonce: options.expectedNonce,
@@ -124,6 +127,7 @@ class RelayManagedChild extends EventEmitter implements HerdrRelayManagedChild {
 				platform: process.platform,
 			};
 			this.terminal = frame.terminal === undefined ? undefined : { backend: "herdr", workspaceId: frame.terminal.workspaceId, tabId: frame.terminal.tabId, paneId: frame.terminal.paneId, terminalId: frame.terminal.terminalId, ownsWorkspace: false, ownsTab: false, ownsPane: false };
+			this.onIdentity?.({ pid: frame.pid, pgid: frame.pgid!, terminal: frame.terminal });
 			return;
 		}
 		if (frame.type === "stdout") {
