@@ -1,0 +1,29 @@
+id = "pi-subagents.hybrid"
+name = "pi-subagents hybrid test plugin"
+version = "0.1.0"
+min_herdr_version = "0.7.4"
+description = "Harmless fake Herdr plugin fixture for pi-subagents contract tests."
+
+[[actions]]
+id = "inspect"
+title = "Inspect subagent"
+command = ["node", "./scripts/action.mjs", "inspect"]
+contexts = ["pane"]
+
+[[actions]]
+id = "stop"
+title = "Request controller stop"
+command = ["node", "./scripts/action.mjs", "stop"]
+contexts = ["pane"]
+
+[[actions]]
+id = "retry"
+title = "Request controller retry"
+command = ["node", "./scripts/action.mjs", "retry"]
+contexts = ["pane"]
+
+[[panes]]
+id = "relay-runner"
+title = "Subagent relay runner"
+command = ["node", "./scripts/relay-runner.mjs"]
+placement = "tab"
