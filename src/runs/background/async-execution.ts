@@ -35,6 +35,7 @@ import {
 	type MaxOutputConfig,
 	type NestedRouteInfo,
 	type ResolvedControlConfig,
+	type ResolvedTerminalConfig,
 	type ResolvedTurnBudget,
 	type ResolvedToolBudget,
 	type SubagentRunMode,
@@ -154,6 +155,7 @@ interface AsyncChainParams {
 	configToolBudget?: ResolvedToolBudget;
 	/** Global cap on simultaneously-running subagent tasks within the async run. */
 	globalConcurrencyLimit?: number;
+	terminalConfig?: ResolvedTerminalConfig;
 }
 
 interface AsyncSingleParams {
@@ -195,6 +197,7 @@ interface AsyncSingleParams {
 	turnBudget?: ResolvedTurnBudget;
 	toolBudget?: ResolvedToolBudget;
 	configToolBudget?: ResolvedToolBudget;
+	terminalConfig?: ResolvedTerminalConfig;
 }
 
 interface AsyncExecutionResult {
@@ -484,6 +487,8 @@ function spawnRunner(cfg: object, suffix: string, cwd: string): { pid?: number; 
 		return { error: error instanceof Error ? error.message : String(error) };
 	}
 }
+
+export const __testSpawnRunner = spawnRunner;
 
 function formatAsyncStartError(mode: SubagentRunMode, message: string): AsyncExecutionResult {
 	return {
@@ -918,6 +923,7 @@ export function executeAsyncChain(
 				timeoutMs: params.timeoutMs,
 				deadlineAt,
 				globalConcurrencyLimit: params.globalConcurrencyLimit,
+				terminalConfig: params.terminalConfig,
 				workflowGraph,
 				nestedRoute: nestedRoute ?? inheritedNestedRoute,
 				nestedSelf: inheritedNestedRoute && nestedAddress ? {
@@ -1237,6 +1243,7 @@ export function executeAsyncSingle(
 				deadlineAt,
 				turnBudget: params.turnBudget,
 				toolBudget: params.toolBudget,
+				terminalConfig: params.terminalConfig,
 				controlIntercomTarget,
 				childIntercomTargets: childIntercomTarget ? [childIntercomTarget(agent, 0)] : undefined,
 				resultMode: "single",

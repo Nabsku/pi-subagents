@@ -1,13 +1,14 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Message } from "@earendil-works/pi-ai";
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
 import { createChildTranscriptWriter, type ChildTranscriptWriter } from "../../shared/child-transcript.ts";
 import { closeSteerInbox, consumeInterruptRequest, consumeSteerRequests, deliverInterruptRequest, deliverStopRequest, deliverTimeoutRequest, enqueueStepSteer, steerAcksDir, steerCapabilityPath, stepSteerInboxDir, watchAsyncControlInbox, type SteerAck, type SteerCapability, type SteerRequest } from "./control-channel.ts";
 import { appendJsonl as appendRawJsonl, formatOutputArtifactContent, getArtifactPaths } from "../../shared/artifacts.ts";
 import { PI_CODING_AGENT_PACKAGE, getPiSpawnCommand, resolveInstalledPiPackageRoot } from "../shared/pi-spawn.ts";
+import { createChildProcessBackend, type ChildProcessBackend } from "../shared/process-backend.ts";
 import { captureSingleOutputSnapshot, extractChildWrittenOutput, finalizeSingleOutput, formatSavedOutputReference, injectOutputPathSystemPrompt, injectSingleOutputInstruction, resolveSingleOutput, type SingleOutputSnapshot } from "../shared/single-output.ts";
 import {
 	type ActivityState,
@@ -21,6 +22,7 @@ import {
 	type NestedRouteInfo,
 	type NestedRunSummary,
 	type ResolvedControlConfig,
+	type ResolvedTerminalConfig,
 	type ResolvedTurnBudget,
 	type ResolvedToolBudget,
 	type SubagentRunMode,
@@ -146,6 +148,7 @@ interface SubagentRunConfig {
 	revivalLease?: SessionLeaseRequest;
 	/** Global cap on simultaneously-running subagent tasks within this run. */
 	globalConcurrencyLimit?: number;
+	terminalConfig?: ResolvedTerminalConfig;
 }
 
 interface StepResult {
@@ -383,7 +386,11 @@ interface RunPiStreamingResult {
 	watchdog?: ChildWatchdogStateSnapshot;
 }
 
-function runPiStreaming(
+interface RunPiStreamingDeps {
+	createChildProcessBackend?: typeof createChildProcessBackend;
+}
+
+export async function runPiStreaming(
 	args: string[],
 	cwd: string,
 	outputFile: string,
@@ -401,21 +408,39 @@ function runPiStreaming(
 	stopMessage?: string,
 	registerTurnBudgetAbort?: (abort: ((message: string, state?: TurnBudgetState) => void) | undefined) => void,
 	onWriterProcess?: (writer: { state: "none" | "spawning" } | { state: "running"; pid: number }) => void,
+	terminalConfig?: ResolvedTerminalConfig,
+	deps: RunPiStreamingDeps = {},
 ): Promise<RunPiStreamingResult> {
-	return new Promise((resolve) => {
-		onWriterProcess?.({ state: "spawning" });
-		const outputStream = fs.createWriteStream(outputFile, { flags: "w" });
-		const spawnEnv = { ...process.env, ...(env ?? {}), ...getSubagentDepthEnv(maxSubagentDepth) };
-		const spawnSpec = getPiSpawnCommand(args, {
-			...(piPackageRoot ? { piPackageRoot } : {}),
-			...(piArgv1 ? { argv1: piArgv1 } : {}),
-		});
-		const child = spawn(spawnSpec.command, spawnSpec.args, {
+	onWriterProcess?.({ state: "spawning" });
+	const outputStream = fs.createWriteStream(outputFile, { flags: "w" });
+	const spawnEnv = { ...process.env, ...(env ?? {}), ...getSubagentDepthEnv(maxSubagentDepth) };
+	const spawnSpec = getPiSpawnCommand(args, {
+		...(piPackageRoot ? { piPackageRoot } : {}),
+		...(piArgv1 ? { argv1: piArgv1 } : {}),
+	});
+	const childProcessBackend = (deps.createChildProcessBackend ?? createChildProcessBackend)(terminalConfig);
+	let child: Awaited<ReturnType<ChildProcessBackend["launch"]>>;
+	try {
+		child = await childProcessBackend.launch({
+			command: spawnSpec.command,
+			args: spawnSpec.args,
 			cwd,
-			stdio: ["ignore", "pipe", "pipe"],
 			env: spawnEnv,
-			windowsHide: true,
+			label: childEventContext?.agent ?? "subagent",
+			runId: childEventContext?.runId ?? "async",
+			childIndex: childEventContext?.stepIndex ?? 0,
 		});
+	} catch (spawnError) {
+		await new Promise<void>((resolve) => outputStream.end(resolve));
+		try {
+			onWriterProcess?.({ state: "none" });
+		} catch {
+			// The runner still owns and releases the lease during finalization.
+		}
+		const message = spawnError instanceof Error ? spawnError.message : String(spawnError);
+		return { stderr: "", exitCode: 1, messages: [], usage: emptyUsage(), error: message, finalOutput: "" };
+	}
+	return new Promise((resolve) => {
 		const stderrTail = createBoundedByteTail();
 		const rawStdoutTail = createBoundedByteTail();
 		const messages: Message[] = [];
@@ -934,6 +959,7 @@ interface SingleStepContext {
 	registerTurnBudgetAbort?: (abort: ((message: string, state?: TurnBudgetState) => void) | undefined) => void;
 	timeoutSignal?: AbortSignal;
 	stopSignal?: AbortSignal;
+	terminalConfig?: ResolvedTerminalConfig;
 	timeoutMessage?: string;
 	stopMessage?: string;
 	turnBudget?: ResolvedTurnBudget;
@@ -1172,6 +1198,7 @@ async function runSingleStep(
 			ctx.stopMessage,
 			ctx.registerTurnBudgetAbort,
 			ctx.onWriterProcess,
+			ctx.terminalConfig,
 		);
 		if (run.turnBudget) turnBudget = run.turnBudget;
 		else if (ctx.turnBudget) {
@@ -2862,6 +2889,7 @@ async function runSubagent(
 					registerTurnBudgetAbort: (abort) => registerStepTurnBudgetAbort(fi, abort),
 					timeoutSignal: timeoutAbortController.signal,
 					stopSignal: stopAbortController.signal,
+					terminalConfig: config.terminalConfig,
 					timeoutMessage,
 					stopMessage,
 					turnBudget: config.turnBudget,
@@ -3166,6 +3194,7 @@ async function runSubagent(
 							registerTurnBudgetAbort: (abort) => registerStepTurnBudgetAbort(fi, abort),
 							timeoutSignal: timeoutAbortController.signal,
 							stopSignal: stopAbortController.signal,
+							terminalConfig: config.terminalConfig,
 							timeoutMessage,
 							stopMessage,
 							turnBudget: config.turnBudget,
@@ -3376,6 +3405,7 @@ async function runSubagent(
 				registerTurnBudgetAbort: (abort) => registerStepTurnBudgetAbort(flatIndex, abort),
 				timeoutSignal: timeoutAbortController.signal,
 				stopSignal: stopAbortController.signal,
+				terminalConfig: config.terminalConfig,
 				timeoutMessage,
 				stopMessage,
 				turnBudget: config.turnBudget,
@@ -3818,8 +3848,13 @@ function startConfiguredSubagent(config: SubagentRunConfig): void {
 	});
 }
 
+function isDirectRunnerInvocation(): boolean {
+	const modulePath = fileURLToPath(import.meta.url);
+	return process.argv.slice(1).some((arg) => path.resolve(arg) === modulePath);
+}
+
 const configArg = process.argv[2];
-if (configArg) {
+if (isDirectRunnerInvocation() && configArg) {
 	try {
 		const configJson = fs.readFileSync(configArg, "utf-8");
 		const config = JSON.parse(configJson) as SubagentRunConfig;
@@ -3833,7 +3868,7 @@ if (configArg) {
 		console.error("Subagent runner error:", err);
 		process.exit(1);
 	}
-} else {
+} else if (isDirectRunnerInvocation()) {
 	let input = "";
 	process.stdin.setEncoding("utf-8");
 	process.stdin.on("data", (chunk) => {

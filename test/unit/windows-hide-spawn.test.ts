@@ -38,6 +38,16 @@ describe("nested child Pi process visibility", () => {
 	});
 
 	it("hides background child Pi process windows on Windows", () => {
-		assertNestedPiSpawnHidesWindows("src/runs/background/subagent-runner.ts");
+		assert.match(
+			readSource("src/runs/background/subagent-runner.ts"),
+			/createChildProcessBackend/,
+			"background runner should route Pi launches through the process backend",
+		);
+		assert.doesNotMatch(
+			readSource("src/runs/background/subagent-runner.ts"),
+			/spawn\(spawnSpec\.command,\s*spawnSpec\.args,\s*\{/,
+			"background runner must not launch Pi children directly",
+		);
+		assertNestedPiSpawnHidesWindows("src/runs/shared/process-backend.ts", /spawnImpl\(request\.command,\s*request\.args,\s*\{[^}]*windowsHide:\s*true/s);
 	});
 });
