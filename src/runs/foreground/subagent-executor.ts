@@ -39,6 +39,7 @@ import type { ScheduledRunAction } from "../background/scheduled-runs.ts";
 import { enqueueChainAppendRequest, readPendingChainAppendRequests, runnerStepOutputNames } from "../background/chain-append.ts";
 import { ChainOutputValidationError, validateChainOutputBindingsWithContext } from "../shared/chain-outputs.ts";
 import { validateExecutionAcceptance } from "../shared/acceptance.ts";
+import { resolveTerminalConfig } from "../shared/terminal-config.ts";
 import { createForkContextResolver, forkedChildRequiresThinkingOff } from "../../shared/fork-context.ts";
 import { resolveCurrentSessionId } from "../../shared/session-identity.ts";
 import { applyIntercomBridgeToAgent, INTERCOM_BRIDGE_MARKER, resolveIntercomBridge, resolveIntercomSessionTarget, resolveSubagentIntercomTarget, type IntercomBridgeState } from "../../intercom/intercom-bridge.ts";
@@ -95,6 +96,7 @@ import {
 	type ResolvedControlConfig,
 	type ResolvedTurnBudget,
 	type ResolvedToolBudget,
+	type ResolvedTerminalConfig,
 	type SingleResult,
 	type ToolBudgetConfig,
 	type TurnBudgetConfig,
@@ -2196,6 +2198,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 		ctx,
 		modelScope: data.modelScope,
 		intercomEvents: deps.pi.events,
+		terminalConfig: resolveTerminalConfig(deps.config.terminal),
 		signal,
 		runId,
 		cwd: effectiveCwd,
@@ -2325,6 +2328,7 @@ interface ForegroundParallelRunInput {
 	ctx: ExtensionContext;
 	state: SubagentState;
 	intercomEvents: IntercomEventBus;
+	terminalConfig: ResolvedTerminalConfig;
 	parentSessionId: string | null;
 	signal: AbortSignal;
 	runId: string;
@@ -2517,6 +2521,7 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			interruptSignal: interruptController.signal,
 			allowIntercomDetach: agentConfig?.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
 			intercomEvents: input.intercomEvents,
+			terminalConfig: input.terminalConfig,
 			runId: input.runId,
 			index,
 			sessionDir: input.sessionDirForIndex(index),
@@ -2835,6 +2840,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			ctx,
 			state: deps.state,
 			intercomEvents: deps.pi.events,
+			terminalConfig: resolveTerminalConfig(deps.config.terminal),
 			parentSessionId: data.parentSessionId,
 			signal,
 			runId,
@@ -3158,6 +3164,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		interruptSignal: interruptController.signal,
 		allowIntercomDetach: agentConfig.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
 		intercomEvents: deps.pi.events,
+		terminalConfig: resolveTerminalConfig(deps.config.terminal),
 		runId,
 		sessionDir: sessionDirForIndex(0),
 		sessionFile: sessionFileForTask(params.agent!, 0, modelOverride),

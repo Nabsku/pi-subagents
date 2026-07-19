@@ -58,6 +58,7 @@ import {
 	type ResolvedControlConfig,
 	type ResolvedTurnBudget,
 	type ResolvedToolBudget,
+	type ResolvedTerminalConfig,
 	type SingleResult,
 	type ToolBudgetConfig,
 	MAX_CONCURRENCY,
@@ -105,6 +106,7 @@ interface ParallelChainRunInput {
 	originalTask: string;
 	ctx: ExtensionContext;
 	intercomEvents?: IntercomEventBus;
+	terminalConfig?: ResolvedTerminalConfig;
 	cwd?: string;
 	runId: string;
 	globalTaskIndex: number;
@@ -321,6 +323,7 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				interruptSignal: interruptController.signal,
 				allowIntercomDetach: taskAgentConfig?.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
 				intercomEvents: input.intercomEvents,
+				terminalConfig: input.terminalConfig,
 				runId: input.runId,
 				index: input.globalTaskIndex + taskIndex,
 				sessionDir: input.sessionDirForIndex(input.globalTaskIndex + taskIndex),
@@ -420,6 +423,8 @@ interface ChainExecutionParams {
 	agents: AgentConfig[];
 	ctx: ExtensionContext;
 	intercomEvents?: IntercomEventBus;
+	terminalConfig?: ResolvedTerminalConfig;
+	modelScope?: ModelScopeConfig;
 	signal?: AbortSignal;
 	runId: string;
 	cwd?: string;
@@ -509,6 +514,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 		orchestratorIntercomTarget,
 		foregroundControl,
 		intercomEvents,
+		terminalConfig,
 		chainSkills: chainSkillsParam,
 		chainDir: chainDirBase,
 		modelScope,
@@ -725,6 +731,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					originalTask,
 					ctx,
 					intercomEvents,
+					terminalConfig,
 					cwd,
 					runId,
 					globalTaskIndex,
@@ -947,6 +954,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				originalTask,
 				ctx,
 				intercomEvents,
+				terminalConfig,
 				cwd,
 				runId,
 				globalTaskIndex,
@@ -1194,6 +1202,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				interruptSignal: interruptController.signal,
 				allowIntercomDetach: agentConfig.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
 				intercomEvents,
+				terminalConfig,
 				runId,
 				index: childIndex,
 				sessionDir: sessionDirForIndex(childIndex),

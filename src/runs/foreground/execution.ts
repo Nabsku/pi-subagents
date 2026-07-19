@@ -319,7 +319,8 @@ async function runSingleAttempt(
 	const spawnEnv = { ...process.env, ...sharedEnv, ...getSubagentDepthEnv(options.maxSubagentDepth) };
 	let observedMutationAttempt = false;
 	const spawnSpec = getPiSpawnCommand(args);
-	const childProcessBackend = (options as RunSyncOptionsWithBackend).childProcessBackend ?? createChildProcessBackend();
+	const childProcessBackend = (options as RunSyncOptionsWithBackend).childProcessBackend
+		?? createChildProcessBackend(options.terminalConfig, { herdrEvents: options.intercomEvents });
 	const childCwd = options.cwd ?? runtimeCwd;
 	let proc: Awaited<ReturnType<ChildProcessBackend["launch"]>>;
 	try {

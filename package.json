@@ -38,6 +38,7 @@
     "skills/**/*",
     "prompts/**/*",
     "README.md",
+    "HERDR_SUBAGENT_EVENTS.md",
     "CHANGELOG.md"
   ],
   "scripts": {

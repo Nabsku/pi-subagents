@@ -7,10 +7,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ResolvedTerminalConfig } from "../../shared/types.ts";
+import type { IntercomEventBus, ResolvedTerminalConfig } from "../../shared/types.ts";
 import { DEFAULT_TERMINAL_CONFIG } from "./terminal-config.ts";
 import { HerdrAdapter, type HerdrTerminalHandle } from "./herdr-adapter.ts";
 import { createHerdrRelayManagedChild, type HerdrRelayManagedChild } from "./herdr-relay.ts";
+import { createHerdrSubagentLifecycle, type HerdrSubagentLifecycle } from "./herdr-subagent-events.ts";
 
 export interface ChildLaunchRequest {
 	command: string;
@@ -74,6 +75,7 @@ export interface ProcessBackendDeps {
 	herdrRunnerPath?: string;
 	herdrReadinessTimeoutMs?: number;
 	onHerdrIdentityReady?: () => void;
+	herdrEvents?: IntercomEventBus;
 }
 
 function emptyDestroyableStream(): NodeJS.ReadableStream & { destroy(error?: Error): void } {
@@ -195,6 +197,7 @@ class HerdrManagedChild extends EventEmitter implements ManagedChild {
 	private launchState: "launching" | "published" | "failed" = "launching";
 	private terminalClose?: Promise<void>;
 	private readonly onIdentityReady?: () => void;
+	private readonly lifecycle?: HerdrSubagentLifecycle;
 
 	constructor(
 		server: Server,
@@ -204,6 +207,7 @@ class HerdrManagedChild extends EventEmitter implements ManagedChild {
 		nonce: string,
 		processKill: typeof process.kill,
 		onIdentityReady?: () => void,
+		lifecycle?: HerdrSubagentLifecycle,
 	) {
 		super();
 		this.server = server;
@@ -212,6 +216,7 @@ class HerdrManagedChild extends EventEmitter implements ManagedChild {
 		this.closeOnExit = closeOnExit;
 		this.processKill = processKill;
 		this.onIdentityReady = onIdentityReady;
+		this.lifecycle = lifecycle;
 		this.identity = { nonce, dedicatedProcessGroup: true, platform: process.platform };
 		this.readiness = new Promise<void>((resolve, reject) => {
 			this.resolveReadiness = resolve;
@@ -262,6 +267,9 @@ class HerdrManagedChild extends EventEmitter implements ManagedChild {
 			throw new Error("Herdr relay settled before launch completed");
 		}
 		this.launchState = "published";
+		if (!this.terminal) throw new Error("Herdr terminal handle was not published");
+		this.lifecycle?.registered(this.terminal);
+		this.lifecycle?.state("running");
 	}
 
 	kill(signal: NodeJS.Signals | number = "SIGTERM"): boolean {
@@ -296,12 +304,15 @@ class HerdrManagedChild extends EventEmitter implements ManagedChild {
 		if (!this.readinessSettled) this.rejectReady(new Error("Herdr relay closed before identity readiness"));
 		this.rejectLaunch(new Error("Herdr relay closed before launch completed"));
 		this.closed = true;
+		this.lifecycle?.state(signal ? "stopped" : code === 0 ? "completed" : "failed");
 		this.stdout.end();
 		this.stderr.end();
 		void this.releaseTransport().then(async () => {
 			if (this.closeOnExit) await this.closeTerminal();
+			this.lifecycle?.released();
 			if (this.launchState === "published") this.emit("close", code, signal);
 		}).catch((error) => {
+			this.lifecycle?.released();
 			if (this.launchState === "published") this.emit("error", error);
 		});
 	}
@@ -315,9 +326,11 @@ class HerdrManagedChild extends EventEmitter implements ManagedChild {
 		const failedBeforePublish = this.launchState !== "published";
 		this.rejectLaunch(launchError);
 		this.closed = true;
+		this.lifecycle?.state("failed");
 		this.stdout.destroy();
 		this.stderr.destroy();
 		void this.releaseTransport().finally(() => {
+			this.lifecycle?.released();
 			if (!failedBeforePublish) {
 				this.emit("error", new Error(error.message));
 				this.emit("close", null, null);
@@ -360,6 +373,7 @@ class HerdrProcessBackend implements ChildProcessBackend {
 	private readonly processKill: typeof process.kill;
 	private readonly readinessTimeoutMs: number;
 	private readonly onIdentityReady?: () => void;
+	private readonly events?: IntercomEventBus;
 
 	constructor(config: ResolvedTerminalConfig, deps: ProcessBackendDeps) {
 		this.config = config;
@@ -368,6 +382,7 @@ class HerdrProcessBackend implements ChildProcessBackend {
 		this.processKill = deps.processKill ?? process.kill;
 		this.readinessTimeoutMs = deps.herdrReadinessTimeoutMs ?? 5_000;
 		this.onIdentityReady = deps.onHerdrIdentityReady;
+		this.events = deps.herdrEvents;
 	}
 
 	async launch(request: ChildLaunchRequest): Promise<ManagedChild> {
@@ -379,13 +394,20 @@ class HerdrProcessBackend implements ChildProcessBackend {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-herdr-"));
 		const socketPath = path.join(root, "relay.sock");
 		const nonce = randomUUID();
+		const lifecycle = createHerdrSubagentLifecycle({
+			events: this.events,
+			enabled: true,
+			runId: request.runId,
+			childIndex: request.childIndex,
+			agent: request.label,
+		});
 		let managed: HerdrManagedChild;
 		const server = createServer((socket) => managed.bindSocket(socket));
 		await new Promise<void>((resolve, reject) => {
 			server.once("error", reject);
 			server.listen(socketPath, () => { server.off("error", reject); resolve(); });
 		});
-		managed = new HerdrManagedChild(server, socketPath, this.adapter, this.config.closeOnExit, nonce, this.processKill, this.onIdentityReady);
+		managed = new HerdrManagedChild(server, socketPath, this.adapter, this.config.closeOnExit, nonce, this.processKill, this.onIdentityReady, lifecycle);
 		let launchFailed = false;
 		let deadlineTimer: NodeJS.Timeout | undefined;
 		try {

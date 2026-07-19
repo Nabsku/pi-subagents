@@ -1115,6 +1115,7 @@ export interface RunSyncOptions {
 	toolBudget?: ResolvedToolBudget;
 	allowIntercomDetach?: boolean;
 	intercomEvents?: IntercomEventBus;
+	terminalConfig?: ResolvedTerminalConfig;
 	onUpdate?: (r: import("@earendil-works/pi-agent-core").AgentToolResult<Details>) => void;
 	onControlEvent?: (event: ControlEvent) => void;
 	onDetachedExit?: (result: SingleResult) => void;
