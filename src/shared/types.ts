@@ -1195,7 +1195,7 @@ export interface ScheduledRunsConfig {
 	maxPending?: number;
 }
 
-export type TerminalBackend = "headless" | "herdr";
+export type TerminalBackend = "headless" | "herdr" | "herdr-plugin";
 export type HerdrPlacement = "tab" | "pane";
 export type TerminalSplitDirection = "right" | "down";
 export type TerminalFallback = "error" | "headless";

@@ -61,7 +61,7 @@ export function resolveTerminalConfig(config: TerminalConfig | undefined): Resol
 	const raw = config as Record<string, unknown>;
 	rejectUnsupportedKeys(raw);
 	return {
-		backend: readStringOption(raw, "backend", ["headless", "herdr"] as const, DEFAULT_TERMINAL_CONFIG.backend),
+		backend: readStringOption(raw, "backend", ["headless", "herdr", "herdr-plugin"] as const, DEFAULT_TERMINAL_CONFIG.backend),
 		placement: readStringOption(raw, "placement", ["tab", "pane"] as const, DEFAULT_TERMINAL_CONFIG.placement),
 		splitDirection: readStringOption(raw, "splitDirection", ["right", "down"] as const, DEFAULT_TERMINAL_CONFIG.splitDirection),
 		focus: readBooleanOption(raw, "focus", DEFAULT_TERMINAL_CONFIG.focus),

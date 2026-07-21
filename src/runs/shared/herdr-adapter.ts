@@ -1,15 +1,17 @@
 import { execFile, type ExecFileException } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { promisify } from "node:util";
 import type { ChildLaunchRequest, TerminalHandle } from "./process-backend.ts";
 import type { HerdrPlacement, TerminalSplitDirection } from "../../shared/types.ts";
 
 const execFileAsync = promisify(execFile);
 const WORKSPACE_ID = /^w[1-9][0-9]*$/;
-const TAB_ID = /^w[1-9][0-9]*:t[1-9][0-9]*$/;
-const PANE_ID = /^w[1-9][0-9]*:p[1-9][0-9]*$/;
+const TAB_ID = /^w[1-9][0-9]*:t[1-9A-Za-z][0-9A-Za-z]*$/;
+const PANE_ID = /^w[1-9][0-9]*:p[1-9A-Za-z][0-9A-Za-z]*$/;
 const TERMINAL_ID = /^term_[A-Za-z0-9_-]+$/;
-const HERDR_PROTOCOL = 16;
+const HERDR_PROTOCOL = 17;
 const HERDR_VERSION = "0.7.4";
 const DEFAULT_TIMEOUT_MS = 2_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
@@ -26,7 +28,7 @@ export interface HerdrAdapterOptions {
 }
 
 export interface HerdrProbeResult {
-	protocol: 16;
+	protocol: 17;
 	version: "0.7.4";
 	schemaVersion: 1;
 }
@@ -117,6 +119,11 @@ function assertNoNul(value: string, label: string): void {
 	if (value.includes("\0")) throw new Error(`${label} must not contain NUL bytes`);
 }
 
+function shellQuote(value: string): string {
+	assertNoNul(value, "command argument");
+	return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
 export function sanitizeHerdrLabel(label: string, fallback = "subagent"): string {
 	const clean = label.replace(/[\r\n	]+/g, " ").replace(/\s+/g, " ").replace(/[\0]/g, "").trim();
 	if (/^(run|session|task)-[A-Za-z0-9_-]+$/.test(clean)) return fallback;
@@ -137,7 +144,8 @@ export class HerdrAdapter {
 	private readonly ownedHandles = new WeakMap<HerdrTerminalHandle, Readonly<OwnedHandle>>();
 
 	constructor(options: HerdrAdapterOptions = {}) {
-		this.executable = options.executable ?? "herdr";
+		const localExecutable = path.join(os.homedir(), ".local", "bin", "herdr");
+		this.executable = options.executable ?? (fs.existsSync(localExecutable) ? localExecutable : "herdr");
 		this.baseArgs = options.baseArgs ?? [];
 		this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 		this.maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
@@ -171,13 +179,14 @@ export class HerdrAdapter {
 
 	async resolvePlacement(request: HerdrPlacementRequest): Promise<{ workspaceId: string; tabId: string; paneId: string }> {
 		await this.probe();
-		const snapshot = parseJson((await this.run(["api", "snapshot"])).stdout, "snapshot");
+		let snapshot = parseJson((await this.run(["api", "snapshot"])).stdout, "snapshot");
+		if (snapshot.result && typeof snapshot.result === "object" && !Array.isArray(snapshot.result)) {
+			const result = snapshot.result as Record<string, unknown>;
+			if (result.snapshot && typeof result.snapshot === "object" && !Array.isArray(result.snapshot)) snapshot = result.snapshot as Record<string, unknown>;
+		}
 		const activePane = this.activePane(snapshot);
 		if (!activePane) {
 			throw new Error("Unable to resolve Herdr parent placement; parent is outside Herdr");
-		}
-		if (request.placement === "pane") {
-			throw new Error("Herdr pane placement is not implemented before the mutation slice; refusing to ignore split direction");
 		}
 		return { workspaceId: activePane.workspaceId, tabId: activePane.tabId, paneId: activePane.paneId };
 	}
@@ -190,14 +199,36 @@ export class HerdrAdapter {
 			throw this.toAdapterError(error, false);
 		}
 		const label = sanitizeHerdrLabel(request.label, "subagent");
-		const argv = ["agent", "start", label, ...(request.parentWorkspaceId ? ["--workspace", request.parentWorkspaceId] : []), "--cwd", request.cwd, "--no-focus", "--", request.command, ...request.args];
-		let payload: Record<string, unknown>;
+		let ownedTabId: string | undefined;
+		let ownedPaneId: string | undefined;
 		try {
-			payload = parseJson((await this.run(argv, { cwd: request.cwd, env: request.env })).stdout, "start");
-			if (payload.result && typeof payload.result === "object" && !Array.isArray(payload.result)) {
-				const result = payload.result as Record<string, unknown>;
-				if (result.agent && typeof result.agent === "object" && !Array.isArray(result.agent)) {
-					payload = result.agent as Record<string, unknown>;
+			const requestedPlacement = request.placement ?? "tab";
+			const placement = await this.resolvePlacement({ placement: requestedPlacement });
+			const requestedWorkspaceId = request.parentWorkspaceId ?? placement.workspaceId;
+			if (requestedPlacement === "pane" && requestedWorkspaceId !== placement.workspaceId) {
+				throw new Error("Herdr pane placement cannot target a different workspace");
+			}
+			const shellEnvArgs = ["--env", `ZDOTDIR=${os.tmpdir()}`, "--env", "HISTFILE=/dev/null", "--env", "GHOSTTY_BIN_DIR=", "--env", "ZELLIJ=herdr-child"];
+			const focusArg = request.focus ? "--focus" : "--no-focus";
+			let payload: Record<string, unknown>;
+			if (requestedPlacement === "pane") {
+				payload = parseJson((await this.run([
+					"pane", "split", placement.paneId,
+					"--direction", request.splitDirection ?? "right",
+					"--cwd", request.cwd, ...shellEnvArgs, focusArg,
+				], { cwd: request.cwd, env: request.env })).stdout, "split");
+				if (payload.result && typeof payload.result === "object" && !Array.isArray(payload.result)) {
+					const result = payload.result as Record<string, unknown>;
+					if (result.pane && typeof result.pane === "object" && !Array.isArray(result.pane)) payload = result.pane as Record<string, unknown>;
+				}
+			} else {
+				payload = parseJson((await this.run([
+					"tab", "create", "--workspace", requestedWorkspaceId,
+					"--cwd", request.cwd, ...shellEnvArgs, "--label", label, focusArg,
+				], { cwd: request.cwd, env: request.env })).stdout, "start");
+				if (payload.result && typeof payload.result === "object" && !Array.isArray(payload.result)) {
+					const result = payload.result as Record<string, unknown>;
+					if (result.root_pane && typeof result.root_pane === "object" && !Array.isArray(result.root_pane)) payload = result.root_pane as Record<string, unknown>;
 				}
 			}
 			const workspaceId = stringField(payload, "workspace_id", WORKSPACE_ID, "start")!;
@@ -205,22 +236,66 @@ export class HerdrAdapter {
 			const paneId = stringField(payload, "pane_id", PANE_ID, "start")!;
 			const terminalId = stringField(payload, "terminal_id", TERMINAL_ID, "start", false);
 			this.validateAncestry({ workspaceId, tabId, paneId });
-			if (request.parentWorkspaceId && workspaceId !== request.parentWorkspaceId) {
-				throw new Error("invalid Herdr start response: did not land in requested workspace");
-			}
+			if (workspaceId !== requestedWorkspaceId) throw new Error("invalid Herdr start response: did not land in requested workspace");
+			if (requestedPlacement === "pane" && tabId !== placement.tabId) throw new Error("invalid Herdr split response: did not land in parent tab");
+			if (requestedPlacement === "pane") ownedPaneId = paneId;
+			else ownedTabId = tabId;
+			const commandText = `printf '\\033[2J\\033[H'; exec ${[request.command, ...request.args].map(shellQuote).join(" ")}`;
+			await this.waitForPaneShell(paneId);
+			await this.run(["pane", "run", paneId, commandText], { cwd: request.cwd, env: request.env });
+			const ownsTab = requestedPlacement === "tab";
 			const handle: HerdrTerminalHandle = Object.freeze({
-				backend: "herdr",
-				workspaceId,
-				tabId,
-				paneId,
+				backend: "herdr", workspaceId, tabId, paneId,
 				...(terminalId ? { terminalId } : {}),
-				ownsWorkspace: false,
-				ownsTab: true,
-				ownsPane: true,
+				ownsWorkspace: false, ownsTab, ownsPane: !ownsTab,
 			});
-			this.ownedHandles.set(handle, Object.freeze({ backend: "herdr", workspaceId, tabId, paneId, terminalId, ownsWorkspace: false, ownsTab: true, ownsPane: true }));
+			this.ownedHandles.set(handle, Object.freeze({ backend: "herdr", workspaceId, tabId, paneId, terminalId, ownsWorkspace: false, ownsTab, ownsPane: !ownsTab }));
 			return handle;
 		} catch (error) {
+			if (ownedPaneId) await this.run(["pane", "close", ownedPaneId]).catch(() => {});
+			else if (ownedTabId) await this.run(["tab", "close", ownedTabId]).catch(() => {});
+			throw this.toAdapterError(error, true);
+		}
+	}
+
+	async startPluginChild(request: ChildLaunchRequest): Promise<HerdrTerminalHandle> {
+		this.validateLaunch(request);
+		if (!request.pluginLaunchFile || !path.isAbsolute(request.pluginLaunchFile)) throw new Error("invalid Herdr plugin launch descriptor path");
+		let ownedPaneId: string | undefined;
+		let ownedTabId: string | undefined;
+		try {
+			await this.probe();
+			const placement = await this.resolvePlacement({ placement: request.placement ?? "tab" });
+			const argv = [
+				"plugin", "pane", "open",
+				"--plugin", "pi-subagents.herdr",
+				"--entrypoint", "subagent",
+				"--placement", request.placement === "pane" ? "split" : "tab",
+				"--cwd", request.cwd,
+				"--env", `PI_SUBAGENTS_LAUNCH_FILE=${request.pluginLaunchFile}`,
+			];
+			if (request.placement === "pane") argv.push("--target-pane", placement.paneId, "--direction", request.splitDirection ?? "right");
+			else argv.push("--workspace", request.parentWorkspaceId ?? placement.workspaceId);
+			argv.push(request.focus ? "--focus" : "--no-focus");
+			let payload = parseJson((await this.run(argv, { cwd: request.cwd, env: request.env })).stdout, "plugin pane open");
+			if (payload.result && typeof payload.result === "object" && !Array.isArray(payload.result)) payload = payload.result as Record<string, unknown>;
+			if (payload.plugin_pane && typeof payload.plugin_pane === "object" && !Array.isArray(payload.plugin_pane)) payload = payload.plugin_pane as Record<string, unknown>;
+			if (payload.pane && typeof payload.pane === "object" && !Array.isArray(payload.pane)) payload = payload.pane as Record<string, unknown>;
+			const workspaceId = stringField(payload, "workspace_id", WORKSPACE_ID, "plugin pane open")!;
+			const tabId = stringField(payload, "tab_id", TAB_ID, "plugin pane open")!;
+			const paneId = stringField(payload, "pane_id", PANE_ID, "plugin pane open")!;
+			const terminalId = stringField(payload, "terminal_id", TERMINAL_ID, "plugin pane open", false);
+			this.validateAncestry({ workspaceId, tabId, paneId });
+			if (request.placement === "pane" && (workspaceId !== placement.workspaceId || tabId !== placement.tabId)) throw new Error("invalid Herdr plugin split response: did not land in parent tab");
+			ownedPaneId = paneId;
+			const ownsTab = request.placement !== "pane";
+			if (ownsTab) { ownedTabId = tabId; ownedPaneId = undefined; }
+			const handle: HerdrTerminalHandle = Object.freeze({ backend: "herdr", workspaceId, tabId, paneId, ...(terminalId ? { terminalId } : {}), ownsWorkspace: false, ownsTab, ownsPane: !ownsTab });
+			this.ownedHandles.set(handle, handle);
+			return handle;
+		} catch (error) {
+			if (ownedPaneId) await this.run(["pane", "close", ownedPaneId]).catch(() => {});
+			else if (ownedTabId) await this.run(["tab", "close", ownedTabId]).catch(() => {});
 			throw this.toAdapterError(error, true);
 		}
 	}
@@ -261,9 +336,16 @@ export class HerdrAdapter {
 		}
 		const verb = owned.ownsPane ? "pane" : owned.ownsTab ? "tab" : "workspace";
 		const target = owned.ownsPane ? owned.paneId : owned.ownsTab ? owned.tabId : owned.workspaceId;
-		const payload = parseJson((await this.run([verb, "close", target])).stdout, "close");
-		if (typeof payload.closed !== "boolean") throw new Error("invalid Herdr close response: closed");
-		return { closed: payload.closed };
+		try {
+			let payload = parseJson((await this.run([verb, "close", target])).stdout, "close");
+			if (payload.result && typeof payload.result === "object" && !Array.isArray(payload.result)) payload = payload.result as Record<string, unknown>;
+			if (payload.type === "ok") return { closed: true };
+			if (typeof payload.closed !== "boolean") throw new Error("invalid Herdr close response: closed");
+			return { closed: payload.closed };
+		} catch (error) {
+			if (/(?:pane|tab)_not_found|(?:pane|tab) .* not found/i.test(error instanceof Error ? error.message : String(error))) return { closed: true };
+			throw error;
+		}
 	}
 
 	private toAdapterError(error: unknown, mutationStarted: boolean): HerdrAdapterError {
@@ -307,6 +389,28 @@ export class HerdrAdapter {
 		}
 	}
 
+	private async waitForPaneShell(paneId: string): Promise<void> {
+		// Herdr reports tab creation before the interactive login shell has finished
+		// running startup hooks. Commands sent during that window can be consumed by
+		// those hooks instead of the shell prompt.
+		await new Promise((resolve) => setTimeout(resolve, 2_000));
+		const deadline = Date.now() + 2_500;
+		let stableShellPolls = 0;
+		while (Date.now() < deadline) {
+			try {
+				const payload = parseJson((await this.run(["pane", "process-info", "--pane", paneId])).stdout, "process-info");
+				const result = payload.result && typeof payload.result === "object" && !Array.isArray(payload.result) ? payload.result as Record<string, unknown> : payload;
+				const info = result.process_info && typeof result.process_info === "object" && !Array.isArray(result.process_info) ? result.process_info as Record<string, unknown> : result;
+				stableShellPolls = typeof info.shell_pid === "number" && info.foreground_process_group_id === info.shell_pid ? stableShellPolls + 1 : 0;
+				if (stableShellPolls >= 3) return;
+			} catch {
+				stableShellPolls = 0;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 100));
+		}
+		throw new Error("Herdr pane shell readiness timed out");
+	}
+
 	private validateLaunch(request: ChildLaunchRequest): void {
 		assertNoNul(request.command, "command");
 		assertNoNul(request.cwd, "cwd");
@@ -338,6 +442,13 @@ export class HerdrAdapter {
 	}
 
 	private activePane(snapshot: Record<string, unknown>): { workspaceId: string; tabId: string; paneId: string } | null {
+		const focusedWorkspaceId = typeof snapshot.focused_workspace_id === "string" && WORKSPACE_ID.test(snapshot.focused_workspace_id) ? snapshot.focused_workspace_id : undefined;
+		const focusedTabId = typeof snapshot.focused_tab_id === "string" && TAB_ID.test(snapshot.focused_tab_id) ? snapshot.focused_tab_id : undefined;
+		const focusedPaneId = typeof snapshot.focused_pane_id === "string" && PANE_ID.test(snapshot.focused_pane_id) ? snapshot.focused_pane_id : undefined;
+		if (focusedWorkspaceId && focusedTabId && focusedPaneId) {
+			this.validateAncestry({ workspaceId: focusedWorkspaceId, tabId: focusedTabId, paneId: focusedPaneId });
+			return { workspaceId: focusedWorkspaceId, tabId: focusedTabId, paneId: focusedPaneId };
+		}
 		const workspaces = Array.isArray(snapshot.workspaces) ? snapshot.workspaces : [];
 		for (const workspaceRaw of workspaces) {
 			const workspace = asObject(workspaceRaw, "workspace");

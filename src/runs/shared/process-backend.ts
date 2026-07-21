@@ -22,6 +22,10 @@ export interface ChildLaunchRequest {
 	runId: string;
 	childIndex: number;
 	parentWorkspaceId?: string;
+	placement?: "tab" | "pane";
+	splitDirection?: "right" | "down";
+	focus?: boolean;
+	pluginLaunchFile?: string;
 }
 
 export interface TerminalHandle {
@@ -71,7 +75,7 @@ export interface ProcessBackendDeps {
 	processKill?: typeof process.kill;
 	platform?: NodeJS.Platform;
 	herdrProbe?: () => unknown;
-	herdrAdapter?: Pick<HerdrAdapter, "startChild" | "close">;
+	herdrAdapter?: Pick<HerdrAdapter, "startChild" | "close"> & Partial<Pick<HerdrAdapter, "startPluginChild">>;
 	herdrRunnerPath?: string;
 	herdrReadinessTimeoutMs?: number;
 	onHerdrIdentityReady?: () => void;
@@ -367,7 +371,7 @@ class HerdrManagedChild extends EventEmitter implements ManagedChild {
 }
 
 class HerdrProcessBackend implements ChildProcessBackend {
-	private readonly adapter: Pick<HerdrAdapter, "startChild" | "close">;
+	private readonly adapter: Pick<HerdrAdapter, "startChild" | "close"> & Partial<Pick<HerdrAdapter, "startPluginChild">>;
 	private readonly runnerPath: string;
 	private readonly config: ResolvedTerminalConfig;
 	private readonly processKill: typeof process.kill;
@@ -388,12 +392,34 @@ class HerdrProcessBackend implements ChildProcessBackend {
 	async launch(request: ChildLaunchRequest): Promise<ManagedChild> {
 		validateLaunchRequest(request);
 		if (process.platform === "win32") throw new Error("Herdr local pane backend is not supported on Windows");
-		if (this.config.placement !== "tab") throw new Error("Herdr local pane backend currently supports terminal.placement=tab only");
-		if (!fs.existsSync(this.runnerPath)) throw new Error(`Herdr relay runner not found: ${this.runnerPath}`);
+		if (this.config.backend === "herdr" && !fs.existsSync(this.runnerPath)) throw new Error(`Herdr relay runner not found: ${this.runnerPath}`);
 		const deadline = Date.now() + this.readinessTimeoutMs;
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-herdr-"));
 		const socketPath = path.join(root, "relay.sock");
+		const envPath = path.join(root, "child-env.json");
+		const launchPath = path.join(root, "plugin-launch.json");
+		const serializedEnv = Object.fromEntries(Object.entries(request.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
 		const nonce = randomUUID();
+		try {
+			fs.writeFileSync(envPath, JSON.stringify(serializedEnv), { mode: 0o600 });
+			if (this.config.backend === "herdr-plugin") {
+				fs.writeFileSync(launchPath, JSON.stringify({
+				schema: "herdr-pi-subagents-launch/v1",
+				version: 1,
+				socketPath,
+				nonce,
+				retention: this.config.closeOnExit ? "close" : "retain",
+				envPath,
+				command: request.command,
+				args: request.args,
+				cwd: request.cwd,
+				label: request.label,
+				}), { mode: 0o600 });
+			}
+		} catch (error) {
+			fs.rmSync(root, { recursive: true, force: true });
+			throw error;
+		}
 		const lifecycle = createHerdrSubagentLifecycle({
 			events: this.events,
 			enabled: true,
@@ -403,10 +429,16 @@ class HerdrProcessBackend implements ChildProcessBackend {
 		});
 		let managed: HerdrManagedChild;
 		const server = createServer((socket) => managed.bindSocket(socket));
-		await new Promise<void>((resolve, reject) => {
-			server.once("error", reject);
-			server.listen(socketPath, () => { server.off("error", reject); resolve(); });
-		});
+		try {
+			await new Promise<void>((resolve, reject) => {
+				server.once("error", reject);
+				server.listen(socketPath, () => { server.off("error", reject); resolve(); });
+			});
+		} catch (error) {
+			server.close();
+			fs.rmSync(root, { recursive: true, force: true });
+			throw error;
+		}
 		managed = new HerdrManagedChild(server, socketPath, this.adapter, this.config.closeOnExit, nonce, this.processKill, this.onIdentityReady, lifecycle);
 		let launchFailed = false;
 		let deadlineTimer: NodeJS.Timeout | undefined;
@@ -417,11 +449,21 @@ class HerdrProcessBackend implements ChildProcessBackend {
 					Math.max(1, deadline - Date.now()),
 				);
 			});
-			const handlePromise = this.adapter.startChild({
-				...request,
-				command: process.execPath,
-				args: [this.runnerPath, socketPath, nonce, this.config.closeOnExit ? "close" : "retain", request.command, ...request.args],
-			}).then(async (handle) => {
+			const launchRequest: ChildLaunchRequest = this.config.backend === "herdr-plugin"
+				? { ...request, placement: this.config.placement, splitDirection: this.config.splitDirection, focus: this.config.focus, pluginLaunchFile: launchPath }
+				: {
+					...request,
+					placement: this.config.placement,
+					splitDirection: this.config.splitDirection,
+					focus: this.config.focus,
+					command: process.execPath,
+					args: [this.runnerPath, socketPath, nonce, this.config.closeOnExit ? "close" : "retain", "--env-file", envPath, request.command, ...request.args],
+				};
+			const pluginStart = this.adapter.startPluginChild?.bind(this.adapter);
+			if (this.config.backend === "herdr-plugin" && !pluginStart) throw new Error("Herdr plugin backend is unavailable in the configured adapter");
+			const handlePromise = (this.config.backend === "herdr-plugin"
+				? pluginStart!(launchRequest)
+				: this.adapter.startChild(launchRequest)).then(async (handle) => {
 				if (launchFailed) {
 					await this.adapter.close(handle).catch(() => {});
 					throw new Error("Herdr launch settled before adapter returned an owned terminal");

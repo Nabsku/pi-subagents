@@ -2064,6 +2064,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			toolBudget: data.toolBudget,
 			configToolBudget: data.configToolBudget,
 			globalConcurrencyLimit: deps.config.globalConcurrencyLimit,
+			terminalConfig: resolveTerminalConfig(deps.config.terminal),
 		});
 	}
 
@@ -2104,6 +2105,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			toolBudget: data.toolBudget,
 			configToolBudget: data.configToolBudget,
 			globalConcurrencyLimit: deps.config.globalConcurrencyLimit,
+			terminalConfig: resolveTerminalConfig(deps.config.terminal),
 		});
 	}
 
@@ -2158,6 +2160,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			turnBudget: data.turnBudget,
 			toolBudget: data.toolBudget,
 			configToolBudget: data.configToolBudget,
+			terminalConfig: resolveTerminalConfig(deps.config.terminal),
 		});
 	}
 
@@ -2289,6 +2292,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 			toolBudget: data.toolBudget,
 			configToolBudget: data.configToolBudget,
 			globalConcurrencyLimit: deps.config.globalConcurrencyLimit,
+			terminalConfig: resolveTerminalConfig(deps.config.terminal),
 		});
 	}
 

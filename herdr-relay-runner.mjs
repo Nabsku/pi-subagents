@@ -1,9 +1,24 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import net from "node:net";
+import { createPiSessionDisplay } from "./herdr-relay-display.mjs";
 
-const [socketPath, nonce, retention, command, ...args] = process.argv.slice(2);
+const [socketPath, nonce, retention, ...launchArgs] = process.argv.slice(2);
+let envFile;
+if (launchArgs[0] === "--env-file") envFile = launchArgs.splice(0, 2)[1];
+const [command, ...args] = launchArgs;
 if (!socketPath || !nonce || !["close", "retain"].includes(retention) || !command) process.exit(64);
+let childEnv = process.env;
+if (envFile) {
+	try {
+		const parsed = JSON.parse(fs.readFileSync(envFile, "utf8"));
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || Object.values(parsed).some((value) => typeof value !== "string")) process.exit(65);
+		childEnv = { ...process.env, ...parsed };
+	} finally {
+		try { fs.unlinkSync(envFile); } catch {}
+	}
+}
 
 const MAGIC = Buffer.from("HRLY");
 const TYPES = { handshake: 1, stdout: 2, stderr: 3, exit: 4, error: 5 };
@@ -24,7 +39,7 @@ await new Promise((resolve, reject) => {
 	socket.once("error", reject);
 });
 
-const child = spawn(command, args, { cwd: process.cwd(), env: process.env, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32", windowsHide: true });
+const child = spawn(command, args, { cwd: process.cwd(), env: childEnv, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32", windowsHide: true });
 const send = (type, metadata = {}, payload) => {
 	if (!transportOpen) return;
 	const currentSeq = seq++;
@@ -40,8 +55,9 @@ const send = (type, metadata = {}, payload) => {
 socket.on("error", () => { transportOpen = false; });
 socket.on("close", () => { transportOpen = false; });
 send("handshake", { pgid: child.pid, terminal: { workspaceId: "local", tabId: "local:tab", paneId: "local:pane" } });
+const display = createPiSessionDisplay(process.stdout, { label: childEnv.PI_SUBAGENT_AGENT ?? "child", cwd: process.cwd() });
 child.stdout.on("data", (chunk) => {
-	process.stdout.write(chunk);
+	display.write(chunk);
 	send("stdout", {}, Buffer.from(chunk));
 });
 child.stderr.on("data", (chunk) => {
@@ -76,8 +92,9 @@ const onChildError = (error) => {
 const onChildClose = (code, signal) => {
 	if (settled) return;
 	settled = true;
+	display.end();
 	send("exit", { code, signal });
-	process.stdout.write(`\n[pi-subagents] child exited (${signal ?? code ?? "unknown"}); pane retained\n`);
+	process.stdout.write(`\n\x1b[2mChild exited (${signal ?? code ?? "unknown"}) · pane retained\x1b[0m\n`);
 	socket.end(releaseRelay);
 };
 child.once("error", onChildError);

@@ -51,10 +51,21 @@ describe("resolveTerminalConfig", () => {
 		});
 	});
 
+	it("accepts the standalone Herdr plugin backend with pane placement", () => {
+		assert.deepEqual(resolveTerminalConfig({ backend: "herdr-plugin", placement: "pane", splitDirection: "down" }), {
+			backend: "herdr-plugin",
+			placement: "pane",
+			splitDirection: "down",
+			focus: false,
+			closeOnExit: false,
+			fallback: "error",
+		});
+	});
+
 	it("rejects invalid explicit terminal blocks before launch", () => {
 		assert.throws(
 			() => resolveTerminalConfig({ backend: "xterm" }),
-			/terminal\.backend must be "headless" or "herdr"/,
+			/terminal\.backend must be "headless" or "herdr" or "herdr-plugin"/,
 		);
 		assert.throws(
 			() => resolveTerminalConfig({ backnd: "herdr" } as any),

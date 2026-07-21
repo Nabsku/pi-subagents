@@ -16,6 +16,41 @@ pi install npm:pi-subagents
 
 That is the only required step. You can add optional pieces later.
 
+### Optional Herdr plugin backend
+
+The `Nabsku/pi-subagents` fork can render child sessions in Herdr through the standalone `pi-subagents.herdr` plugin. Herdr owns pane/tab placement and the read-only Pi-style transcript; `pi-subagents` remains authoritative for orchestration, lifecycle, retries, artifacts, and results.
+
+Install the standalone plugin:
+
+```sh
+herdr plugin install Nabsku/herdr-pi-subagents
+```
+
+For plugin development, link a checkout instead:
+
+```sh
+herdr plugin link /absolute/path/to/herdr-pi-subagents
+```
+
+Then create `~/.pi/agent/extensions/subagent/config.json`:
+
+```json
+{
+  "terminal": {
+    "backend": "herdr-plugin",
+    "placement": "pane",
+    "splitDirection": "right",
+    "focus": false,
+    "closeOnExit": false,
+    "fallback": "error"
+  }
+}
+```
+
+Use `placement: "tab"` for one tab per child, or `placement: "pane"` with `splitDirection: "right"` or `"down"` to split the parent tab. Run the parent Pi session inside Herdr so the plugin receives the current workspace, tab, pane, and native Pi socket context. Start a fresh Pi process after changing this config.
+
+Requires Herdr 0.7.4+, Node.js 24+, macOS or Linux, and the matching fork build. Windows is not currently supported. A missing/disabled plugin, incompatible Herdr protocol, or Pi running outside Herdr fails explicitly. Use `fallback: "error"`; automatic fallback to headless is not implemented for this backend. The plugin pane is intentionally read-only and does not create a second orchestration registry.
+
 ## Try this first
 
 You do not need to create agents, write config, or learn slash commands. After installing, ask Pi for delegation in plain language:

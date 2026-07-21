@@ -293,15 +293,15 @@ if (mode === "timeout" || (mode === "start-timeout" && argv[0] === "agent" && ar
 	await new Promise(() => {});
 }
 if (mode === "bad-protocol" && argv.join(" ") === "api schema --json") {
-	json({ protocol: 15, schema_version: 1, request: {}, response: {}, event: {}, version: "0.7.4" });
+	json({ protocol: 16, schema_version: 1, request: {}, response: {}, event: {}, version: "0.7.4" });
 	process.exit(0);
 }
 if (mode === "bad-version" && argv.join(" ") === "api schema --json") {
-	json({ protocol: 16, schema_version: 1, request: {}, response: {}, event: {}, version: "0.7.3" });
+	json({ protocol: 17, schema_version: 1, request: {}, response: {}, event: {}, version: "0.7.3" });
 	process.exit(0);
 }
-if (mode === "bad-ids" && argv[0] === "agent" && argv[1] === "start") {
-	json({ workspace_id: "workspace-1", tab_id: "tab-1", pane_id: "pane-1" });
+if (mode === "bad-ids" && argv[0] === "tab" && argv[1] === "create") {
+	json({ result: { root_pane: { workspace_id: "workspace-1", tab_id: "tab-1", pane_id: "pane-1" } } });
 	process.exit(0);
 }
 if (mode === "large-output") {
@@ -310,7 +310,7 @@ if (mode === "large-output") {
 }
 
 if (argv.join(" ") === "api schema --json") {
-	json({ protocol: 16, schema_version: 1, request: {}, response: {}, event: {}, version: "0.7.4" });
+	json({ protocol: 17, schema_version: 1, request: {}, response: {}, event: {}, version: "0.7.4" });
 	process.exit(0);
 }
 if (argv[0] === "plugin" && argv[1] === "link") {
@@ -400,17 +400,18 @@ if (argv.join(" ") === "api snapshot") {
 	json({ workspaces: [{ id: "w1", tabs: [{ id: "w1:t1", panes: [{ id: "w1:p1", active: inside }] }] }] });
 	process.exit(0);
 }
-if (argv[0] === "agent" && argv[1] === "start") {
-	if (mode === "wrong-workspace-start") {
-		json({ workspace_id: "w2", tab_id: "w2:t2", pane_id: "w2:p2", terminal_id: "term_abc-123" });
-		process.exit(0);
-	}
+if (argv[0] === "tab" && argv[1] === "create") {
 	const workspaceArg = argv[argv.indexOf("--workspace") + 1];
-	if (WORKSPACE_PATTERN.test(workspaceArg)) {
-		json({ workspace_id: workspaceArg, tab_id: `${workspaceArg}:t2`, pane_id: `${workspaceArg}:p2`, terminal_id: "term_abc-123" });
-		process.exit(0);
-	}
-	json({ workspace_id: "w1", tab_id: "w1:t2", pane_id: "w1:p2", terminal_id: "term_abc-123" });
+	const workspaceId = mode === "wrong-workspace-start" ? "w2" : (WORKSPACE_PATTERN.test(workspaceArg) ? workspaceArg : "w1");
+	json({ result: { root_pane: { workspace_id: workspaceId, tab_id: `${workspaceId}:t2`, pane_id: `${workspaceId}:p2`, terminal_id: "term_abc-123" } } });
+	process.exit(0);
+}
+if (argv[0] === "pane" && argv[1] === "process-info") {
+	json({ result: { process_info: { shell_pid: 4242, foreground_process_group_id: 4242, foreground_processes: [{ pid: 4242, name: "zsh" }] } } });
+	process.exit(0);
+}
+if (argv[0] === "pane" && argv[1] === "run") {
+	json({ type: "ok" });
 	process.exit(0);
 }
 if (argv[0] === "pane" && argv[1] === "inspect") {

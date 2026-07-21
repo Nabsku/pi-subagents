@@ -17,6 +17,8 @@ import { resolveTerminalConfig } from "../../src/runs/shared/terminal-config.ts"
 import { HERDR_RELAY_PROTOCOL_VERSION, encodeHerdrRelayFrame, type HerdrRelayFrame } from "../../src/runs/shared/herdr-relay-protocol.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../src/shared/post-exit-stdio-guard.ts";
 
+const pluginRunnerPath = path.resolve(process.cwd(), "../herdr-pi-subagents/scripts/relay-runner.mjs");
+
 function request(overrides: Partial<ChildLaunchRequest> = {}): ChildLaunchRequest {
 	return {
 		command: process.execPath,
@@ -110,6 +112,35 @@ describe("process backend selection", () => {
 		child.kill("SIGTERM");
 		await child.releaseTransport();
 		assert.equal(herdrProbeCount, 0);
+	});
+
+	it("launches the standalone Herdr plugin backend through a private descriptor", { skip: !fs.existsSync(pluginRunnerPath) ? "standalone plugin checkout unavailable" : undefined }, async () => {
+		let launch: ChildLaunchRequest | undefined;
+		let runner: ReturnType<typeof spawn> | undefined;
+		const terminal = { backend: "herdr" as const, workspaceId: "w1", tabId: "w1:t2", paneId: "w1:p2", terminalId: "term_plugin", ownsWorkspace: false, ownsTab: false, ownsPane: true };
+		const backend = createChildProcessBackend(resolveTerminalConfig({ backend: "herdr-plugin", placement: "pane", closeOnExit: true }), {
+			herdrAdapter: {
+				startChild: async () => { throw new Error("embedded Herdr backend must not be used"); },
+				startPluginChild: async (input) => {
+					launch = input;
+					runner = spawn(process.execPath, [pluginRunnerPath], { cwd: input.cwd, env: { ...input.env, PI_SUBAGENTS_LAUNCH_FILE: input.pluginLaunchFile! }, stdio: "ignore" });
+					return terminal;
+				},
+				close: async () => ({ closed: true }),
+			},
+		});
+		const child = await backend.launch(request({ args: ["-e", "process.stdout.write('plugin-out')"] }));
+		const output: Buffer[] = [];
+		child.stdout.on("data", (chunk) => output.push(Buffer.from(chunk)));
+		await once(child, "close");
+		assert.equal(Buffer.concat(output).toString(), "plugin-out");
+		assert.ok(launch?.pluginLaunchFile);
+		assert.equal(launch?.placement, "pane");
+		assert.equal(launch?.command, process.execPath);
+		assert.deepEqual(launch?.args, ["-e", "process.stdout.write('plugin-out')"]);
+		assert.equal(fs.existsSync(path.dirname(launch!.pluginLaunchFile!)), false);
+		assert.ok(runner);
+		await waitForRunnerClose(runner!);
 	});
 
 	it("launches the explicit local Herdr backend through the adapter and leaves only a bounded retained pane host", async () => {
