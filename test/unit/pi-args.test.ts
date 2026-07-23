@@ -131,6 +131,21 @@ describe("buildPiArgs session wiring", () => {
 		}), /task must not be empty/);
 	});
 
+	it("transports even short tasks through a private prompt file", () => {
+		const built = buildPiArgs({
+			baseArgs: ["-p"], task: "inspect the adapter", sessionEnabled: false,
+			inheritProjectContext: false, inheritSkills: false,
+		});
+		try {
+			assert.ok(!built.args.includes("Task: inspect the adapter"));
+			const taskArg = built.args.find((arg) => arg.startsWith("@") && arg.endsWith("task.md"));
+			assert.ok(taskArg);
+			assert.equal(fs.readFileSync(taskArg.slice(1), "utf8"), "Task: inspect the adapter");
+		} finally {
+			if (built.tempDir) fs.rmSync(built.tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("uses --session when sessionFile is provided", () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-args-session-"));
 		try {

@@ -14,7 +14,6 @@ import { CHILD_WATCHDOG_CONFIG_ENV, encodeChildWatchdogConfig, type ChildWatchdo
 import { WAIT_TOOL_ENABLED_ENV } from "../background/wait-config.ts";
 import { PI_CODING_AGENT_PACKAGE_ROOT_ENV } from "../../shared/utils.ts";
 
-const TASK_ARG_LIMIT = 8000;
 const PROMPT_RUNTIME_EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "subagent-prompt-runtime.ts");
 const FANOUT_CHILD_EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "extension", "fanout-child.ts");
 export const SUBAGENT_CHILD_ENV = "PI_SUBAGENT_CHILD";
@@ -181,16 +180,13 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 		args.push(input.systemPromptMode === "replace" ? "--system-prompt" : "--append-system-prompt", promptPath);
 	}
 
-	if (input.task.length > TASK_ARG_LIMIT) {
-		if (!tempDir) {
-			tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-"));
-		}
-		const taskFilePath = path.join(tempDir, "task.md");
-		fs.writeFileSync(taskFilePath, `Task: ${input.task}`, { mode: 0o600 });
-		args.push(`@${taskFilePath}`);
-	} else {
-		args.push(`Task: ${input.task}`);
-	}
+	// Keep delegated prompts out of process argv. Besides avoiding prompt leakage in
+	// process inspectors, this prevents runtime wrappers from mistaking the Node
+	// CLI script path for the first positional prompt. Pi expands @file arguments.
+	if (!tempDir) tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-"));
+	const taskFilePath = path.join(tempDir, "task.md");
+	fs.writeFileSync(taskFilePath, `Task: ${input.task}`, { mode: 0o600 });
+	args.push(`@${taskFilePath}`);
 
 	const env: Record<string, string | undefined> = {};
 	const piPackageRoot = process.env[PI_CODING_AGENT_PACKAGE_ROOT_ENV] ?? resolvePiPackageRoot();
