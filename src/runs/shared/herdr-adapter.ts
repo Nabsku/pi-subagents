@@ -12,7 +12,7 @@ const TAB_ID = /^w[1-9][0-9]*:t[1-9A-Za-z][0-9A-Za-z]*$/;
 const PANE_ID = /^w[1-9][0-9]*:p[1-9A-Za-z][0-9A-Za-z]*$/;
 const TERMINAL_ID = /^term_[A-Za-z0-9_-]+$/;
 const HERDR_PROTOCOL = 17;
-const HERDR_VERSION = "0.7.4";
+const HERDR_MIN_VERSION = "0.7.4";
 const DEFAULT_TIMEOUT_MS = 2_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_LABEL_CHARS = 48;
@@ -29,7 +29,7 @@ export interface HerdrAdapterOptions {
 
 export interface HerdrProbeResult {
 	protocol: 17;
-	version: "0.7.4";
+	version: string;
 	schemaVersion: 1;
 }
 
@@ -124,6 +124,23 @@ function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
+function parseSemverCore(value: string): [number, number, number] | undefined {
+	const match = /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(value);
+	if (!match) return undefined;
+	return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+export function isSupportedHerdrVersion(version: string): boolean {
+	const actual = parseSemverCore(version);
+	const minimum = parseSemverCore(HERDR_MIN_VERSION)!;
+	if (!actual) return false;
+	for (let index = 0; index < 3; index++) {
+		if (actual[index]! > minimum[index]!) return true;
+		if (actual[index]! < minimum[index]!) return false;
+	}
+	return true;
+}
+
 export function sanitizeHerdrLabel(label: string, fallback = "subagent"): string {
 	const clean = label.replace(/[\r\n	]+/g, " ").replace(/\s+/g, " ").replace(/[\0]/g, "").trim();
 	if (/^(run|session|task)-[A-Za-z0-9_-]+$/.test(clean)) return fallback;
@@ -144,12 +161,11 @@ export class HerdrAdapter {
 	private readonly ownedHandles = new WeakMap<HerdrTerminalHandle, Readonly<OwnedHandle>>();
 
 	constructor(options: HerdrAdapterOptions = {}) {
-		const localExecutable = path.join(os.homedir(), ".local", "bin", "herdr");
-		this.executable = options.executable ?? (fs.existsSync(localExecutable) ? localExecutable : "herdr");
+		this.env = options.env ?? process.env;
+		this.executable = options.executable ?? this.env.HERDR_BIN_PATH ?? "herdr";
 		this.baseArgs = options.baseArgs ?? [];
 		this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 		this.maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
-		this.env = options.env ?? process.env;
 	}
 
 	async probe(): Promise<HerdrProbeResult> {
@@ -171,10 +187,10 @@ export class HerdrAdapter {
 			throw new Error("Herdr schema missing response");
 		}
 		const version = schema.version ?? (/herdr\s+(\S+)/i.exec((await this.run(["--version"])).stdout)?.[1]);
-		if (version !== HERDR_VERSION) {
-			throw new Error(`Herdr incompatible version: expected Herdr v${HERDR_VERSION}`);
+		if (typeof version !== "string" || !isSupportedHerdrVersion(version)) {
+			throw new Error(`Herdr incompatible version: requires Herdr >=${HERDR_MIN_VERSION}; found ${String(version ?? "unknown")}`);
 		}
-		return { protocol: HERDR_PROTOCOL, version: HERDR_VERSION, schemaVersion: 1 };
+		return { protocol: HERDR_PROTOCOL, version, schemaVersion: 1 };
 	}
 
 	async resolvePlacement(request: HerdrPlacementRequest): Promise<{ workspaceId: string; tabId: string; paneId: string }> {

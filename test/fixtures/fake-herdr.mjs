@@ -300,6 +300,10 @@ if (mode === "bad-version" && argv.join(" ") === "api schema --json") {
 	json({ protocol: 17, schema_version: 1, request: {}, response: {}, event: {}, version: "0.7.3" });
 	process.exit(0);
 }
+if (mode === "future-version" && argv.join(" ") === "api schema --json") {
+	json({ protocol: 17, schema_version: 1, request: {}, response: {}, event: {}, version: "0.7.5" });
+	process.exit(0);
+}
 if (mode === "bad-ids" && argv[0] === "tab" && argv[1] === "create") {
 	json({ result: { root_pane: { workspace_id: "workspace-1", tab_id: "tab-1", pane_id: "pane-1" } } });
 	process.exit(0);

@@ -7,6 +7,7 @@ import {
 	HerdrAdapter,
 	HerdrAdapterError,
 	isHerdrFallbackEligible,
+	isSupportedHerdrVersion,
 	sanitizeHerdrLabel,
 	type HerdrTerminalHandle,
 } from "../../src/runs/shared/herdr-adapter.ts";
@@ -49,11 +50,21 @@ describe("HerdrAdapter probe", () => {
 		await assert.rejects(() => makeAdapter({ mode: "server-stopped" }).probe(), /Herdr server is not running/);
 	});
 
+	it("accepts compatible Herdr patch and later versions", async () => {
+		assert.equal(isSupportedHerdrVersion("0.7.3"), false);
+		assert.equal(isSupportedHerdrVersion("0.7.4"), true);
+		assert.equal(isSupportedHerdrVersion("0.7.5"), true);
+		assert.equal(isSupportedHerdrVersion("0.8.0"), true);
+		assert.equal(isSupportedHerdrVersion("1.0.0"), true);
+		assert.equal(isSupportedHerdrVersion("not-semver"), false);
+		assert.deepEqual(await makeAdapter({ mode: "future-version" }).probe(), { protocol: 17, version: "0.7.5", schemaVersion: 1 });
+	});
+
 	it("rejects malformed JSON, timeouts, incompatible protocol/version, and parent outside Herdr", async () => {
 		await assert.rejects(() => makeAdapter({ mode: "malformed-json" }).probe(), /invalid JSON/);
 		await assert.rejects(() => makeAdapter({ mode: "timeout", timeoutMs: 25 }).probe(), /timed out/);
 		await assert.rejects(() => makeAdapter({ mode: "bad-protocol" }).probe(), /protocol 17/);
-		await assert.rejects(() => makeAdapter({ mode: "bad-version" }).probe(), /Herdr v0\.7\.4/);
+		await assert.rejects(() => makeAdapter({ mode: "bad-version" }).probe(), /requires Herdr >=0\.7\.4; found 0\.7\.3/);
 		await assert.rejects(() => makeAdapter({ mode: "parent-outside" }).resolvePlacement({ placement: "pane" }), /parent.*Herdr/i);
 		await assert.rejects(() => makeAdapter({ mode: "parent-outside" }).resolvePlacement({ placement: "tab" }), /parent.*Herdr/i);
 		await assert.rejects(() => makeAdapter({ mode: "large-output", maxOutputBytes: 1024 }).probe(), /output.*exceeded|stdout maxBuffer length exceeded/i);
