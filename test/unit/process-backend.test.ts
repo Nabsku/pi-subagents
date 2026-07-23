@@ -129,7 +129,13 @@ describe("process backend selection", () => {
 				close: async () => ({ closed: true }),
 			},
 		});
-		const child = await backend.launch(request({ args: ["-e", "process.stdout.write('plugin-out')"] }));
+		const child = await backend.launch(request({
+			args: ["-e", "process.stdout.write('plugin-out')"],
+			parentWorkspaceId: "w1",
+			parentTabId: "w1:t1",
+			parentPaneId: "w1:p1",
+			parentTerminalId: "term_parent",
+		}));
 		const output: Buffer[] = [];
 		child.stdout.on("data", (chunk) => output.push(Buffer.from(chunk)));
 		await once(child, "close");
@@ -138,6 +144,10 @@ describe("process backend selection", () => {
 		assert.equal(launch?.placement, "pane");
 		assert.equal(launch?.command, process.execPath);
 		assert.deepEqual(launch?.args, ["-e", "process.stdout.write('plugin-out')"]);
+		assert.equal(launch?.parentWorkspaceId, "w1");
+		assert.equal(launch?.parentTabId, "w1:t1");
+		assert.equal(launch?.parentPaneId, "w1:p1");
+		assert.equal(launch?.parentTerminalId, "term_parent");
 		assert.equal(fs.existsSync(path.dirname(launch!.pluginLaunchFile!)), false);
 		assert.ok(runner);
 		await waitForRunnerClose(runner!);

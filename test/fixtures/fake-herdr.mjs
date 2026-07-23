@@ -6,10 +6,10 @@ const argv = process.argv.slice(2);
 let mode = process.env.FAKE_HERDR_MODE ?? "ok";
 let logPath = process.env.FAKE_HERDR_LOG;
 const WORKSPACE_PATTERN = /^w[1-9][0-9]*$/;
-const PLUGIN_ID = "pi-subagents.hybrid";
+const PLUGIN_ID = "pi-subagents.herdr";
 const PLUGIN_ROOT = path.resolve("test/fixtures/herdr-plugin");
-const PLUGIN_ACTIONS = ["inspect", "stop", "retry"];
-const PLUGIN_ENTRYPOINT = "relay-runner";
+const PLUGIN_ACTIONS = [];
+const PLUGIN_ENTRYPOINT = "subagent";
 const DOCUMENTED_ENV_KEYS = new Set([
 	"HERDR_SOCKET_PATH",
 	"HERDR_BIN_PATH",
@@ -24,6 +24,7 @@ const DOCUMENTED_ENV_KEYS = new Set([
 	"HERDR_WORKSPACE_ID",
 	"HERDR_TAB_ID",
 	"HERDR_PANE_ID",
+	"HERDR_TERMINAL_ID",
 	"PI_RUN_ID",
 ]);
 
@@ -72,7 +73,10 @@ function validatePluginArgv(tokens) {
 		return;
 	}
 	if (tokens[1] === "pane" && tokens[2] === "open") {
-		const options = parseStrictOptions(tokens.slice(3), new Set(["--plugin", "--entrypoint", "--placement", "--cwd", "--workspace", "--target-pane", "--direction", "--env"]), new Set(["--env"]));
+		const optionsTokens = tokens.slice(3);
+		const focus = optionsTokens.at(-1);
+		if (focus === "--focus" || focus === "--no-focus") optionsTokens.pop();
+		const options = parseStrictOptions(optionsTokens, new Set(["--plugin", "--entrypoint", "--placement", "--cwd", "--workspace", "--target-pane", "--direction", "--env"]), new Set(["--env"]));
 		for (const required of ["--plugin", "--entrypoint", "--placement", "--cwd"]) if (!options.has(required)) invalidArgv(`missing ${required}`);
 		return;
 	}
@@ -206,7 +210,7 @@ function validateManifest(root, manifest) {
 	assertString(pane, "title", "panes");
 	assertString(pane, "placement", "panes");
 	if (pane.id !== PLUGIN_ENTRYPOINT) throw new Error("invalid plugin manifest panes.id");
-	if (pane.placement !== "tab") throw new Error("unsupported plugin manifest panes.placement");
+	if (pane.placement !== "tab" && pane.placement !== "split") throw new Error("unsupported plugin manifest panes.placement");
 	validateScript(root, pane.command);
 }
 
@@ -368,7 +372,9 @@ if (argv[0] === "plugin" && argv[1] === "pane" && argv[2] === "open") {
 		process.stderr.write("unknown plugin pane\n");
 		process.exit(2);
 	}
-	const workspaceId = argv.includes("--workspace") ? argv[argv.indexOf("--workspace") + 1] : "w1";
+	const requestedWorkspaceId = argv.includes("--workspace") ? argv[argv.indexOf("--workspace") + 1] : "w1";
+	const workspaceId = mode === "wrong-plugin-workspace" ? "w2" : requestedWorkspaceId;
+	const tabId = mode === "wrong-plugin-tab" ? `${workspaceId}:t9` : `${workspaceId}:t3`;
 	const inheritedEnv = {};
 	for (let index = 0; index < argv.length; index += 1) {
 		if (argv[index] === "--env") {
@@ -379,11 +385,12 @@ if (argv[0] === "plugin" && argv[1] === "pane" && argv[2] === "open") {
 	logPluginCommand(["node", "./scripts/relay-runner.mjs"], pluginEnv({
 		HERDR_PLUGIN_ENTRYPOINT_ID: PLUGIN_ENTRYPOINT,
 		HERDR_WORKSPACE_ID: workspaceId,
-		HERDR_TAB_ID: `${workspaceId}:t3`,
+		HERDR_TAB_ID: tabId,
 		HERDR_PANE_ID: `${workspaceId}:p3`,
+		HERDR_TERMINAL_ID: "term_plugin-123",
 		...inheritedEnv,
 	}));
-	json({ type: "plugin_pane_opened", plugin_id: PLUGIN_ID, entrypoint_id: PLUGIN_ENTRYPOINT, workspace_id: workspaceId, tab_id: `${workspaceId}:t3`, pane_id: `${workspaceId}:p3`, terminal_id: "term_plugin-123" });
+	json({ type: "plugin_pane_opened", plugin_id: PLUGIN_ID, entrypoint_id: PLUGIN_ENTRYPOINT, workspace_id: workspaceId, tab_id: tabId, pane_id: `${workspaceId}:p3`, terminal_id: "term_plugin-123" });
 	process.exit(0);
 }
 if (argv[0] === "plugin" && argv[1] === "log" && argv[2] === "list") {

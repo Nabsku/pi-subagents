@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import type { ChildLaunchRequest, TerminalHandle } from "./process-backend.ts";
 import type { HerdrPlacement, TerminalSplitDirection } from "../../shared/types.ts";
 
+
 const execFileAsync = promisify(execFile);
 const WORKSPACE_ID = /^w[1-9][0-9]*$/;
 const TAB_ID = /^w[1-9][0-9]*:t[1-9A-Za-z][0-9A-Za-z]*$/;
@@ -36,6 +37,10 @@ export interface HerdrProbeResult {
 export interface HerdrPlacementRequest {
 	placement: HerdrPlacement;
 	splitDirection?: TerminalSplitDirection;
+	parentWorkspaceId?: string;
+	parentTabId?: string;
+	parentPaneId?: string;
+	parentTerminalId?: string;
 }
 
 export interface HerdrPaneInspection {
@@ -195,6 +200,8 @@ export class HerdrAdapter {
 
 	async resolvePlacement(request: HerdrPlacementRequest): Promise<{ workspaceId: string; tabId: string; paneId: string }> {
 		await this.probe();
+		const explicit = this.explicitParent(request);
+		if (explicit) return explicit;
 		let snapshot = parseJson((await this.run(["api", "snapshot"])).stdout, "snapshot");
 		if (snapshot.result && typeof snapshot.result === "object" && !Array.isArray(snapshot.result)) {
 			const result = snapshot.result as Record<string, unknown>;
@@ -219,7 +226,13 @@ export class HerdrAdapter {
 		let ownedPaneId: string | undefined;
 		try {
 			const requestedPlacement = request.placement ?? "tab";
-			const placement = await this.resolvePlacement({ placement: requestedPlacement });
+			const placement = await this.resolvePlacement({
+				placement: requestedPlacement,
+				parentWorkspaceId: request.parentWorkspaceId,
+				parentTabId: request.parentTabId,
+				parentPaneId: request.parentPaneId,
+				parentTerminalId: request.parentTerminalId,
+			});
 			const requestedWorkspaceId = request.parentWorkspaceId ?? placement.workspaceId;
 			if (requestedPlacement === "pane" && requestedWorkspaceId !== placement.workspaceId) {
 				throw new Error("Herdr pane placement cannot target a different workspace");
@@ -281,7 +294,13 @@ export class HerdrAdapter {
 		let ownedTabId: string | undefined;
 		try {
 			await this.probe();
-			const placement = await this.resolvePlacement({ placement: request.placement ?? "tab" });
+			const placement = await this.resolvePlacement({
+				placement: request.placement ?? "tab",
+				parentWorkspaceId: request.parentWorkspaceId,
+				parentTabId: request.parentTabId,
+				parentPaneId: request.parentPaneId,
+				parentTerminalId: request.parentTerminalId,
+			});
 			const argv = [
 				"plugin", "pane", "open",
 				"--plugin", "pi-subagents.herdr",
@@ -302,6 +321,7 @@ export class HerdrAdapter {
 			const paneId = stringField(payload, "pane_id", PANE_ID, "plugin pane open")!;
 			const terminalId = stringField(payload, "terminal_id", TERMINAL_ID, "plugin pane open", false);
 			this.validateAncestry({ workspaceId, tabId, paneId });
+			if (workspaceId !== placement.workspaceId) throw new Error("invalid Herdr plugin pane response: did not land in parent workspace");
 			if (request.placement === "pane" && (workspaceId !== placement.workspaceId || tabId !== placement.tabId)) throw new Error("invalid Herdr plugin split response: did not land in parent tab");
 			ownedPaneId = paneId;
 			const ownsTab = request.placement !== "pane";
@@ -350,6 +370,11 @@ export class HerdrAdapter {
 		if (owned.ownsWorkspace && (owned.ownsTab || owned.ownsPane)) {
 			throw new Error("invalid Herdr handle: workspace ownership cannot be mixed with tab or pane ownership");
 		}
+		return this.closeOwnedSnapshot(owned);
+	}
+
+
+	private async closeOwnedSnapshot(owned: Readonly<OwnedHandle>): Promise<HerdrCloseResult> {
 		const verb = owned.ownsPane ? "pane" : owned.ownsTab ? "tab" : "workspace";
 		const target = owned.ownsPane ? owned.paneId : owned.ownsTab ? owned.tabId : owned.workspaceId;
 		try {
@@ -435,6 +460,9 @@ export class HerdrAdapter {
 			assertNoNul(request.parentWorkspaceId, "parentWorkspaceId");
 			if (!WORKSPACE_ID.test(request.parentWorkspaceId)) throw new Error("invalid Herdr launch request: parentWorkspaceId");
 		}
+		if (request.parentTabId && !TAB_ID.test(request.parentTabId)) throw new Error("invalid Herdr launch request: parentTabId");
+		if (request.parentPaneId && !PANE_ID.test(request.parentPaneId)) throw new Error("invalid Herdr launch request: parentPaneId");
+		if (request.parentTerminalId && !TERMINAL_ID.test(request.parentTerminalId)) throw new Error("invalid Herdr launch request: parentTerminalId");
 		for (const arg of request.args) assertNoNul(arg, "arg");
 		for (const [key, value] of Object.entries(request.env)) {
 			assertNoNul(key, "env key");
@@ -455,6 +483,22 @@ export class HerdrAdapter {
 		if (!handle.tabId.startsWith(`${handle.workspaceId}:`) || !handle.paneId.startsWith(`${handle.workspaceId}:`)) {
 			throw new Error("invalid Herdr handle ancestry: workspaceId must match tabId and paneId");
 		}
+	}
+
+	private explicitParent(request: HerdrPlacementRequest): { workspaceId: string; tabId: string; paneId: string } | undefined {
+		if (request.parentTabId === undefined && request.parentPaneId === undefined && request.parentTerminalId === undefined) return undefined;
+		if (!request.parentWorkspaceId || !request.parentTabId || !request.parentPaneId) {
+			throw new Error("invalid Herdr parent identity: workspace, tab, and pane IDs must be provided together");
+		}
+		if (!WORKSPACE_ID.test(request.parentWorkspaceId) || !TAB_ID.test(request.parentTabId) || !PANE_ID.test(request.parentPaneId)) {
+			throw new Error("invalid Herdr parent identity: malformed workspace, tab, or pane ID");
+		}
+		if (request.parentTerminalId !== undefined && !TERMINAL_ID.test(request.parentTerminalId)) {
+			throw new Error("invalid Herdr parent identity: malformed terminal ID");
+		}
+		const parent = { workspaceId: request.parentWorkspaceId, tabId: request.parentTabId, paneId: request.parentPaneId };
+		this.validateAncestry(parent);
+		return parent;
 	}
 
 	private activePane(snapshot: Record<string, unknown>): { workspaceId: string; tabId: string; paneId: string } | null {

@@ -72,6 +72,58 @@ describe("HerdrAdapter probe", () => {
 });
 
 describe("HerdrAdapter start/read/close", () => {
+	it("uses explicit parent identity despite focus drift and verifies exact plugin ancestry", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-herdr-parent-identity-"));
+		try {
+			const logPath = path.join(root, "fake-herdr.log");
+			const request = {
+				command: process.execPath,
+				args: [],
+				cwd: process.cwd(),
+				env: process.env,
+				label: "x",
+				runId: "r",
+				childIndex: 0,
+				pluginLaunchFile: path.join(root, "launch.json"),
+				parentWorkspaceId: "w1",
+				parentTabId: "w1:t3",
+				parentPaneId: "w1:p1",
+				parentTerminalId: "term_parent",
+			};
+
+			const handle = await makeAdapter({ mode: "active-later", logPath }).startPluginChild({ ...request, placement: "pane" });
+			assert.deepEqual({ workspaceId: handle.workspaceId, tabId: handle.tabId }, { workspaceId: "w1", tabId: "w1:t3" });
+			const log = readLog(logPath);
+			assert.equal(log.some((entry) => entry.argv.join(" ") === "api snapshot"), false);
+			const open = log.find((entry) => entry.argv.slice(0, 3).join(" ") === "node ./scripts/relay-runner.mjs");
+			assert.ok(open);
+			assert.equal(open.env.HERDR_WORKSPACE_ID, "w1");
+			assert.equal(open.env.HERDR_TAB_ID, "w1:t3");
+
+			await assert.rejects(
+				() => makeAdapter({ mode: "wrong-plugin-tab" }).startPluginChild({ ...request, placement: "pane" }),
+				/plugin split response.*parent tab/,
+			);
+			await assert.rejects(
+				() => makeAdapter({ mode: "wrong-plugin-workspace" }).startPluginChild({ ...request, placement: "tab" }),
+				/plugin pane response.*parent workspace/,
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("fails closed on partial or inconsistent explicit parent identity", async () => {
+		await assert.rejects(
+			() => makeAdapter().resolvePlacement({ placement: "pane", parentTabId: "w1:t1" }),
+			/IDs must be provided together/,
+		);
+		await assert.rejects(
+			() => makeAdapter().resolvePlacement({ placement: "pane", parentWorkspaceId: "w1", parentTabId: "w2:t1", parentPaneId: "w1:p1" }),
+			/handle ancestry/,
+		);
+	});
+
 	it("starts a child with exact argv, cwd, env, --no-focus, strict IDs, and no shell reconstruction", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-herdr-adapter-"));
 		try {

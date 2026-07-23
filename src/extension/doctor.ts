@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { execFileSync } from "node:child_process";
 import { discoverAgentsAll, type AgentSource } from "../agents/agents.ts";
 import { isAsyncAvailable } from "../runs/background/async-execution.ts";
 import { formatSpawnBudgetSummary, getSpawnBudgetSnapshot } from "../runs/shared/spawn-budget.ts";
@@ -27,6 +28,18 @@ interface DoctorDeps {
 	discoverAgentsAll: typeof discoverAgentsAll;
 	discoverAvailableSkills: typeof discoverAvailableSkills;
 	diagnoseIntercomBridge: typeof diagnoseIntercomBridge;
+	diagnoseHerdr: typeof diagnoseHerdr;
+}
+
+export interface HerdrDiagnostic {
+	version?: string;
+	protocol?: number;
+	schemaVersion?: number;
+	pluginInstalled: boolean;
+	pluginEnabled: boolean;
+	splitSupported: boolean;
+	parentIdentity?: { workspaceId: string; tabId: string; paneId: string };
+	error?: string;
 }
 
 interface DoctorReportInput {
@@ -56,7 +69,73 @@ const DEFAULT_DEPS: DoctorDeps = {
 	discoverAgentsAll,
 	discoverAvailableSkills,
 	diagnoseIntercomBridge,
+	diagnoseHerdr,
 };
+
+const HERDR_PLUGIN_IDS = new Set(["pi-subagents.herdr", "pi-subagents.hybrid"]);
+
+function jsonCommand(executable: string, baseArgs: string[], args: string[]): Record<string, unknown> {
+	const output = execFileSync(executable, [...baseArgs, ...args], { encoding: "utf8", timeout: 2_000, maxBuffer: 2 * 1024 * 1024, windowsHide: true });
+	const value = JSON.parse(output) as unknown;
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${args.join(" ")} did not return a JSON object`);
+	return value as Record<string, unknown>;
+}
+
+function parentIdentity(snapshot: Record<string, unknown>): HerdrDiagnostic["parentIdentity"] {
+	const source = snapshot.result && typeof snapshot.result === "object" && !Array.isArray(snapshot.result) ? snapshot.result as Record<string, unknown> : snapshot;
+	const nested = source.snapshot && typeof source.snapshot === "object" && !Array.isArray(source.snapshot) ? source.snapshot as Record<string, unknown> : source;
+	if (typeof nested.focused_workspace_id === "string" && typeof nested.focused_tab_id === "string" && typeof nested.focused_pane_id === "string") {
+		return { workspaceId: nested.focused_workspace_id, tabId: nested.focused_tab_id, paneId: nested.focused_pane_id };
+	}
+	for (const workspace of Array.isArray(nested.workspaces) ? nested.workspaces : []) {
+		if (!workspace || typeof workspace !== "object" || Array.isArray(workspace)) continue;
+		const workspaceRecord = workspace as Record<string, unknown>;
+		for (const tab of Array.isArray(workspaceRecord.tabs) ? workspaceRecord.tabs : []) {
+			if (!tab || typeof tab !== "object" || Array.isArray(tab)) continue;
+			const tabRecord = tab as Record<string, unknown>;
+			for (const pane of Array.isArray(tabRecord.panes) ? tabRecord.panes : []) {
+				if (!pane || typeof pane !== "object" || Array.isArray(pane) || (pane as Record<string, unknown>).active !== true) continue;
+				const paneRecord = pane as Record<string, unknown>;
+				if (typeof workspaceRecord.id === "string" && typeof tabRecord.id === "string" && typeof paneRecord.id === "string") {
+					return { workspaceId: workspaceRecord.id, tabId: tabRecord.id, paneId: paneRecord.id };
+				}
+			}
+		}
+	}
+	return undefined;
+}
+
+function parentIdentityFromEnv(env: NodeJS.ProcessEnv = process.env): HerdrDiagnostic["parentIdentity"] {
+	const workspaceId = env.HERDR_WORKSPACE_ID?.trim();
+	const tabId = env.HERDR_TAB_ID?.trim();
+	const paneId = env.HERDR_PANE_ID?.trim();
+	if (!workspaceId && !tabId && !paneId) return undefined;
+	if (!workspaceId || !tabId || !paneId) throw new Error("partial Herdr parent identity in environment");
+	return { workspaceId, tabId, paneId };
+}
+
+export function diagnoseHerdr(executable = process.env["HERDR_BIN_PATH"] ?? "herdr", baseArgs: string[] = []): HerdrDiagnostic {
+	try {
+		const schema = jsonCommand(executable, baseArgs, ["api", "schema", "--json"]);
+		const pluginsPayload = jsonCommand(executable, baseArgs, ["plugin", "list", "--json"]);
+		const plugins = Array.isArray(pluginsPayload.plugins) ? pluginsPayload.plugins : [];
+		const plugin = plugins.find((candidate) => candidate && typeof candidate === "object" && HERDR_PLUGIN_IDS.has(String((candidate as Record<string, unknown>).id))) as Record<string, unknown> | undefined;
+		const panes = plugin && Array.isArray(plugin.panes) ? plugin.panes : [];
+		const splitSupported = panes.some((pane) => pane && typeof pane === "object" && ["subagent", "relay-runner"].includes(String((pane as Record<string, unknown>).id)));
+		let identity = parentIdentityFromEnv();
+		if (!identity) {
+			try { identity = parentIdentity(jsonCommand(executable, baseArgs, ["api", "snapshot"])); } catch {}
+		}
+		return {
+			version: typeof schema.version === "string" ? schema.version : undefined,
+			protocol: typeof schema.protocol === "number" ? schema.protocol : undefined,
+			schemaVersion: typeof schema.schema_version === "number" ? schema.schema_version : undefined,
+			pluginInstalled: Boolean(plugin), pluginEnabled: plugin?.enabled === true, splitSupported, parentIdentity: identity,
+		};
+	} catch (error) {
+		return { pluginInstalled: false, pluginEnabled: false, splitSupported: false, error: errorText(error) };
+	}
+}
 
 function errorText(error: unknown): string {
 	return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
@@ -206,6 +285,32 @@ function formatTerminalBackendSection(config: ExtensionConfig): string[] {
 	}).split("\n");
 }
 
+function formatHerdrSection(input: DoctorReportInput, deps: DoctorDeps): string[] {
+	const terminal = resolveTerminalConfig(input.config.terminal);
+	if (terminal.backend !== "herdr-plugin") return ["- verdict: not selected (terminal.backend is not herdr-plugin)"];
+	const diagnostic = deps.diagnoseHerdr();
+	if (diagnostic.error) return [
+		`- capability probe: failed — ${diagnostic.error}`,
+		"- verdict: incompatible — install or start Herdr, then rerun /subagents-doctor",
+	];
+	const protocolOk = diagnostic.protocol === 17 && diagnostic.schemaVersion === 1;
+	const identity = diagnostic.parentIdentity;
+	const missing = [
+		...(!protocolOk ? ["Herdr protocol/schema capability"] : []),
+		...(!diagnostic.pluginInstalled ? ["install pi-subagents.herdr"] : !diagnostic.pluginEnabled ? ["enable pi-subagents.herdr"] : []),
+		...(!diagnostic.splitSupported ? ["plugin pane/split entrypoint"] : []),
+		...(!identity ? ["parent Herdr pane identity"] : []),
+	];
+	return [
+		`- Herdr: version ${diagnostic.version ?? "unknown"}; protocol ${diagnostic.protocol ?? "unknown"}; schema ${diagnostic.schemaVersion ?? "unknown"}`,
+		`- plugin: ${diagnostic.pluginInstalled ? "installed" : "missing"}; ${diagnostic.pluginEnabled ? "enabled" : "disabled"}`,
+		`- split support: ${diagnostic.splitSupported ? "available" : "unavailable"}`,
+		`- parent identity: ${identity ? `${identity.workspaceId} / ${identity.tabId} / ${identity.paneId}` : "unavailable (run the parent Pi session inside Herdr)"}`,
+		"- prompt transport: private file descriptors supported (0600 launch and environment files; prompt is not placed in argv)",
+		`- verdict: ${missing.length === 0 ? "compatible — Herdr plugin launch capabilities are available" : `incompatible — ${missing.join(", ")} required`}`,
+	];
+}
+
 export function buildDoctorReport(input: DoctorReportInput): string {
 	const paths = input.paths ?? DEFAULT_PATHS;
 	const deps = { ...DEFAULT_DEPS, ...input.deps };
@@ -234,6 +339,9 @@ export function buildDoctorReport(input: DoctorReportInput): string {
 		"",
 		"Terminal backend",
 		...formatTerminalBackendSection(input.config),
+		"",
+		"Herdr plugin",
+		...lineFromCheck("Herdr plugin", () => formatHerdrSection(input, deps).join("\n")).split("\n"),
 		"",
 		"Intercom bridge",
 		...lineFromCheck("intercom bridge", () => formatIntercomDiagnostic(deps.diagnoseIntercomBridge({

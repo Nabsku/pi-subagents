@@ -13,6 +13,7 @@ import { HerdrAdapter, type HerdrTerminalHandle } from "./herdr-adapter.ts";
 import { createHerdrRelayManagedChild, type HerdrRelayManagedChild } from "./herdr-relay.ts";
 import { createHerdrSubagentLifecycle, type HerdrSubagentLifecycle } from "./herdr-subagent-events.ts";
 
+
 export interface ChildLaunchRequest {
 	command: string;
 	args: string[];
@@ -21,7 +22,11 @@ export interface ChildLaunchRequest {
 	label: string;
 	runId: string;
 	childIndex: number;
+
 	parentWorkspaceId?: string;
+	parentTabId?: string;
+	parentPaneId?: string;
+	parentTerminalId?: string;
 	placement?: "tab" | "pane";
 	splitDirection?: "right" | "down";
 	focus?: boolean;
@@ -98,6 +103,9 @@ function validateLaunchRequest(request: ChildLaunchRequest): void {
 	assertNoNul(request.command, "command");
 	assertNoNul(request.cwd, "cwd");
 	assertNoNul(request.parentWorkspaceId, "parentWorkspaceId");
+	assertNoNul(request.parentTabId, "parentTabId");
+	assertNoNul(request.parentPaneId, "parentPaneId");
+	assertNoNul(request.parentTerminalId, "parentTerminalId");
 	request.args.forEach((arg, index) => assertNoNul(arg, `args[${index}]`));
 	for (const [key, value] of Object.entries(request.env)) {
 		assertNoNul(key, "env key");
@@ -393,6 +401,7 @@ class HerdrProcessBackend implements ChildProcessBackend {
 		validateLaunchRequest(request);
 		if (process.platform === "win32") throw new Error("Herdr local pane backend is not supported on Windows");
 		if (this.config.backend === "herdr" && !fs.existsSync(this.runnerPath)) throw new Error(`Herdr relay runner not found: ${this.runnerPath}`);
+
 		const deadline = Date.now() + this.readinessTimeoutMs;
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-herdr-"));
 		const socketPath = path.join(root, "relay.sock");
@@ -480,6 +489,7 @@ class HerdrProcessBackend implements ChildProcessBackend {
 		} catch (error) {
 			launchFailed = true;
 			await managed.closeTerminal().catch(() => {});
+
 			await managed.releaseTransport();
 			fs.rmSync(root, { recursive: true, force: true });
 			throw error;

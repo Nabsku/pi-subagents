@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import { buildDoctorReport } from "../../src/extension/doctor.ts";
+import { buildDoctorReport, diagnoseHerdr } from "../../src/extension/doctor.ts";
 import type { AgentConfig, ChainConfig } from "../../src/agents/agents.ts";
 import type { SubagentState } from "../../src/shared/types.ts";
 
@@ -48,12 +48,39 @@ function makeChain(name: string, source: ChainConfig["source"]): ChainConfig {
 }
 
 describe("buildDoctorReport", () => {
-	it("reports resolved Herdr terminal configuration", () => {
+	it("probes Herdr and its plugin by capability", () => {
+		const fake = diagnoseHerdr(process.execPath, [path.resolve("test/fixtures/fake-herdr.mjs")]);
+		assert.deepEqual(fake, {
+			version: "0.7.4", protocol: 17, schemaVersion: 1,
+			pluginInstalled: true, pluginEnabled: true, splitSupported: true,
+			parentIdentity: { workspaceId: "w1", tabId: "w1:t1", paneId: "w1:p1" },
+		});
+	});
+
+	it("prefers explicit parent identity from the Pi environment over focused snapshot state", () => {
+		const keys = ["HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID"] as const;
+		const prior = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+		try {
+			process.env.HERDR_WORKSPACE_ID = "w9";
+			process.env.HERDR_TAB_ID = "w9:t8";
+			process.env.HERDR_PANE_ID = "w9:p7";
+			const fake = diagnoseHerdr(process.execPath, [path.resolve("test/fixtures/fake-herdr.mjs")]);
+			assert.deepEqual(fake.parentIdentity, { workspaceId: "w9", tabId: "w9:t8", paneId: "w9:p7" });
+		} finally {
+			for (const key of keys) {
+				const value = prior[key];
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	});
+
+	it("reports Herdr plugin capabilities and private prompt transport", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-doctor-herdr-"));
 		try {
 			const report = buildDoctorReport({
 				cwd: root,
-				config: { terminal: { backend: "herdr", placement: "tab", focus: false, closeOnExit: false, fallback: "error" } },
+				config: { terminal: { backend: "herdr-plugin", placement: "tab", focus: false, closeOnExit: false, fallback: "error" } },
 				state: makeState(root),
 				paths: {
 					tempRootDir: root,
@@ -62,6 +89,11 @@ describe("buildDoctorReport", () => {
 					chainRunsDir: root,
 				},
 				deps: {
+					diagnoseHerdr: () => ({
+						version: "0.8.0", protocol: 17, schemaVersion: 1,
+						pluginInstalled: true, pluginEnabled: true, splitSupported: true,
+						parentIdentity: { workspaceId: "w1", tabId: "w1:t1", paneId: "w1:p1" },
+					}),
 					isAsyncAvailable: () => true,
 					discoverAgentsAll: () => ({
 						builtin: [], package: [], user: [], project: [], chains: [], packageErrors: [],
@@ -74,10 +106,34 @@ describe("buildDoctorReport", () => {
 			});
 
 			assert.match(report, /Terminal backend/);
-			assert.match(report, /- backend: herdr/);
+			assert.match(report, /- backend: herdr-plugin/);
 			assert.match(report, /- placement: tab/);
 			assert.match(report, /- focus: false/);
 			assert.match(report, /- fallback: error/);
+			assert.match(report, /Herdr: version 0\.8\.0; protocol 17; schema 1/);
+			assert.match(report, /plugin: installed; enabled/);
+			assert.match(report, /split support: available/);
+			assert.match(report, /parent identity: w1 \/ w1:t1 \/ w1:p1/);
+			assert.match(report, /prompt transport: private file descriptors supported/);
+			assert.match(report, /verdict: compatible/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("gives actionable Herdr plugin compatibility failures", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-doctor-herdr-failure-"));
+		try {
+			const report = buildDoctorReport({
+				cwd: root,
+				config: { terminal: { backend: "herdr-plugin", placement: "pane" } },
+				state: makeState(root),
+				deps: { diagnoseHerdr: () => ({ protocol: 17, schemaVersion: 1, pluginInstalled: false, pluginEnabled: false, splitSupported: false }) },
+			});
+			assert.match(report, /plugin: missing; disabled/);
+			assert.match(report, /install pi-subagents\.herdr/);
+			assert.match(report, /plugin pane\/split entrypoint/);
+			assert.match(report, /parent Herdr pane identity/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

@@ -332,6 +332,10 @@ async function runSingleAttempt(
 			label: agent.name,
 			runId: options.runId,
 			childIndex: options.index ?? 0,
+			parentWorkspaceId: spawnEnv.HERDR_WORKSPACE_ID,
+			parentTabId: spawnEnv.HERDR_TAB_ID,
+			parentPaneId: spawnEnv.HERDR_PANE_ID,
+			parentTerminalId: spawnEnv.HERDR_TERMINAL_ID,
 		});
 	} catch (error) {
 		cleanupTempDir(tempDir);

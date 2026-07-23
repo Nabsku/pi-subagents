@@ -429,6 +429,10 @@ export async function runPiStreaming(
 			label: childEventContext?.agent ?? "subagent",
 			runId: childEventContext?.runId ?? "async",
 			childIndex: childEventContext?.stepIndex ?? 0,
+			parentWorkspaceId: spawnEnv.HERDR_WORKSPACE_ID,
+			parentTabId: spawnEnv.HERDR_TAB_ID,
+			parentPaneId: spawnEnv.HERDR_PANE_ID,
+			parentTerminalId: spawnEnv.HERDR_TERMINAL_ID,
 		});
 	} catch (spawnError) {
 		await new Promise<void>((resolve) => outputStream.end(resolve));
