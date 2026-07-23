@@ -32,6 +32,7 @@ function safeToolName(value) {
 export function createPiSessionDisplay(output = process.stdout, options = {}) {
 	let buffered = "";
 	let started = false;
+	let taskShown = false;
 	const write = (text) => output.write(text);
 	const banner = () => {
 		if (started) return;
@@ -54,6 +55,11 @@ export function createPiSessionDisplay(output = process.stdout, options = {}) {
 				write(`${GREEN}✓${RESET} ${safeToolName(event.toolName)}\n`);
 				break;
 			case "message_end":
+				if (event.message?.role === "user" && !taskShown) {
+					taskShown = true;
+					const task = textParts(event.message.content).join("\n").trim();
+					if (task) write(`${BOLD}Task${RESET}\n${safeText(task, 4096)}\n\n`);
+				}
 				if (event.message?.role === "assistant") for (const text of textParts(event.message.content)) write(`\n${text.trim()}\n`);
 				break;
 			case "tool_result_end":

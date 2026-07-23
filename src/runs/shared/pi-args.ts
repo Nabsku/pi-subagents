@@ -109,6 +109,7 @@ export function applyThinkingSuffix(model: string | undefined, thinking: string 
 }
 
 export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
+	if (!input.task.trim()) throw new Error("Subagent task must not be empty");
 	const args = [...input.baseArgs];
 
 	if (input.sessionFile) {

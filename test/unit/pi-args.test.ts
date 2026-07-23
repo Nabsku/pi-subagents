@@ -124,6 +124,13 @@ afterEach(() => {
 });
 
 describe("buildPiArgs session wiring", () => {
+	it("rejects empty tasks before spawning Pi", () => {
+		assert.throws(() => buildPiArgs({
+			baseArgs: ["-p"], task: "   ", sessionEnabled: false,
+			inheritProjectContext: false, inheritSkills: false,
+		}), /task must not be empty/);
+	});
+
 	it("uses --session when sessionFile is provided", () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-args-session-"));
 		try {
