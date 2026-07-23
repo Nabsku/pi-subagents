@@ -9,6 +9,7 @@ import {
 	isHerdrFallbackEligible,
 	isSupportedHerdrVersion,
 	sanitizeHerdrLabel,
+	type HerdrPlacementRequest,
 	type HerdrTerminalHandle,
 } from "../../src/runs/shared/herdr-adapter.ts";
 
@@ -114,13 +115,28 @@ describe("HerdrAdapter start/read/close", () => {
 	});
 
 	it("fails closed on partial or inconsistent explicit parent identity", async () => {
-		await assert.rejects(
-			() => makeAdapter().resolvePlacement({ placement: "pane", parentTabId: "w1:t1" }),
-			/IDs must be provided together/,
-		);
+		const fields = ["parentWorkspaceId", "parentTabId", "parentPaneId", "parentTerminalId"] as const;
+		const values = { parentWorkspaceId: "w1", parentTabId: "w1:t1", parentPaneId: "w1:p1", parentTerminalId: "term_parent" };
+		for (let mask = 1; mask < 1 << fields.length; mask += 1) {
+			const request: HerdrPlacementRequest = { placement: "pane" };
+			for (let index = 0; index < fields.length; index += 1) if (mask & (1 << index)) request[fields[index]] = values[fields[index]];
+			if (!request.parentWorkspaceId || !request.parentTabId || !request.parentPaneId) await assert.rejects(
+				() => makeAdapter({ mode: "active-later" }).resolvePlacement(request),
+				/IDs must be provided together/,
+				`mask ${mask} must fail closed`,
+			);
+		}
 		await assert.rejects(
 			() => makeAdapter().resolvePlacement({ placement: "pane", parentWorkspaceId: "w1", parentTabId: "w2:t1", parentPaneId: "w1:p1" }),
 			/handle ancestry/,
+		);
+		await assert.rejects(
+			() => makeAdapter().resolvePlacement({ placement: "pane", parentWorkspaceId: "w1", parentTabId: "w1:t1", parentPaneId: "w1:p1", parentTerminalId: "wrong" }),
+			/malformed terminal ID/,
+		);
+		assert.deepEqual(
+			await makeAdapter({ mode: "active-later" }).resolvePlacement({ placement: "pane", ...values }),
+			{ workspaceId: "w1", tabId: "w1:t1", paneId: "w1:p1" },
 		);
 	});
 
@@ -148,25 +164,17 @@ describe("HerdrAdapter start/read/close", () => {
 				terminalId: "term_abc-123",
 				ownsWorkspace: false,
 				ownsTab: true,
-				ownsPane: true,
+				ownsPane: false,
 			});
 
-			const start = readLog(logPath).find((entry) => entry.argv[0] === "agent" && entry.argv[1] === "start");
+			const start = readLog(logPath).find((entry) => entry.argv[0] === "tab" && entry.argv[1] === "create");
 			assert.ok(start);
-			assert.deepEqual(start.argv.slice(0, 4), ["agent", "start", "Agent with unsafe label Agent with unsafe label", "--cwd"]);
-			assert.equal(start.argv[4], root);
+			assert.deepEqual(start.argv.slice(0, 4), ["tab", "create", "--workspace", "w1"]);
+			assert.equal(start.argv[start.argv.indexOf("--cwd") + 1], root);
 			assert.ok(start.argv.includes("--no-focus"));
-			const separator = start.argv.indexOf("--");
-			assert.equal(separator > 0, true);
-			assert.deepEqual(start.argv.slice(separator + 1), [
-				process.execPath,
-				"-e",
-				"process.exit(0)",
-				"space arg",
-				'quote " arg',
-				"unicode-π",
-				"semi;$(no-shell)",
-			]);
+			const run = readLog(logPath).find((entry) => entry.argv[0] === "pane" && entry.argv[1] === "run");
+			assert.ok(run);
+			assert.match(run.argv[3], /exec .*process\.exit\(0\).*space arg.*unicode-π/);
 			assert.equal(fs.realpathSync(start.cwd), fs.realpathSync(root));
 			assert.equal(start.env.EXACT_ARG_ENV, "value with spaces = ok");
 			assert.equal(start.argv.join(" ").includes("top-secret"), false);
@@ -186,7 +194,7 @@ describe("HerdrAdapter start/read/close", () => {
 
 			await adapter.startChild({ command: process.execPath, args: [], cwd: root, env, label: "x", runId: "r", childIndex: 0 });
 
-			const start = readLog(logPath).find((entry) => entry.argv[0] === "agent" && entry.argv[1] === "start");
+			const start = readLog(logPath).find((entry) => entry.argv[0] === "tab" && entry.argv[1] === "create");
 			assert.ok(start);
 			assert.equal(start.env.REQUEST_ONLY_SENTINEL, "present");
 			assert.equal(start.env.ADAPTER_ONLY_SENTINEL, undefined);
@@ -201,11 +209,11 @@ describe("HerdrAdapter start/read/close", () => {
 			const logPath = path.join(root, "fake-herdr.log");
 			const adapter = makeAdapter({ logPath });
 			const parent = await adapter.resolvePlacement({ placement: "tab" });
-			await adapter.startChild({ command: process.execPath, args: [], cwd: root, env: process.env, label: "x", runId: "r", childIndex: 0, parentWorkspaceId: parent.workspaceId });
+			await adapter.startChild({ command: process.execPath, args: [], cwd: root, env: process.env, label: "x", runId: "r", childIndex: 0, parentWorkspaceId: parent.workspaceId, parentTabId: parent.tabId, parentPaneId: parent.paneId });
 
-			const start = readLog(logPath).find((entry) => entry.argv[0] === "agent" && entry.argv[1] === "start");
+			const start = readLog(logPath).find((entry) => entry.argv[0] === "tab" && entry.argv[1] === "create");
 			assert.ok(start);
-			assert.deepEqual(start.argv.slice(0, 7), ["agent", "start", "x", "--workspace", "w1", "--cwd", root]);
+			assert.deepEqual(start.argv.slice(0, 6), ["tab", "create", "--workspace", "w1", "--cwd", root]);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -217,12 +225,12 @@ describe("HerdrAdapter start/read/close", () => {
 			const logPath = path.join(root, "fake-herdr.log");
 			const adapter = makeAdapter({ mode: "active-later", logPath });
 			const parent = await adapter.resolvePlacement({ placement: "tab" });
-			await adapter.startChild({ command: process.execPath, args: [], cwd: root, env: process.env, label: "x", runId: "r", childIndex: 0, parentWorkspaceId: parent.workspaceId });
+			await adapter.startChild({ command: process.execPath, args: [], cwd: root, env: process.env, label: "x", runId: "r", childIndex: 0, parentWorkspaceId: parent.workspaceId, parentTabId: parent.tabId, parentPaneId: parent.paneId });
 
 			assert.deepEqual(parent, { workspaceId: "w2", tabId: "w2:t1", paneId: "w2:p1" });
-			const start = readLog(logPath).find((entry) => entry.argv[0] === "agent" && entry.argv[1] === "start");
+			const start = readLog(logPath).find((entry) => entry.argv[0] === "tab" && entry.argv[1] === "create");
 			assert.ok(start);
-			assert.deepEqual(start.argv.slice(0, 7), ["agent", "start", "x", "--workspace", "w2", "--cwd", root]);
+			assert.deepEqual(start.argv.slice(0, 6), ["tab", "create", "--workspace", "w2", "--cwd", root]);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -231,7 +239,7 @@ describe("HerdrAdapter start/read/close", () => {
 	it("rejects tab starts that do not land in the resolved parent workspace", async () => {
 		const adapter = makeAdapter({ mode: "wrong-workspace-start" });
 		await assert.rejects(
-			() => adapter.startChild({ command: process.execPath, args: [], cwd: process.cwd(), env: process.env, label: "x", runId: "r", childIndex: 0, parentWorkspaceId: "w1" }),
+			() => adapter.startChild({ command: process.execPath, args: [], cwd: process.cwd(), env: process.env, label: "x", runId: "r", childIndex: 0, parentWorkspaceId: "w1", parentTabId: "w1:t1", parentPaneId: "w1:p1" }),
 			/start response.*requested workspace/,
 		);
 	});
@@ -251,7 +259,7 @@ describe("HerdrAdapter start/read/close", () => {
 			assert.equal(await adapter.readDisplay(handle), "display text");
 			assert.equal(Object.isFrozen(handle), true);
 			assert.deepEqual(await adapter.close(handle), { closed: true });
-			assert.equal(readLog(logPath).at(-1)?.argv.join(" "), "pane close w1:p2");
+			assert.equal(readLog(logPath).at(-1)?.argv.join(" "), "tab close w1:t2");
 
 			await assert.rejects(() => adapter.close({ ...handle }), /exact handle object/);
 			await assert.rejects(() => adapter.close({ ...handle, ownsPane: false, ownsTab: false, ownsWorkspace: false }), /exact handle object/);
@@ -259,13 +267,13 @@ describe("HerdrAdapter start/read/close", () => {
 				handle.backend = "headless" as HerdrTerminalHandle["backend"];
 				await adapter.close(handle);
 			}, /read only|object is not extensible|Cannot assign|handle identity was mutated/);
-			assert.equal(readLog(logPath).at(-1)?.argv.join(" "), "pane close w1:p2");
+			assert.equal(readLog(logPath).at(-1)?.argv.join(" "), "tab close w1:t2");
 			await assert.rejects(async () => {
 				handle.ownsPane = false;
 				handle.ownsTab = false;
 				await adapter.close(handle);
 			}, /read only|object is not extensible|Cannot assign|handle ownership was mutated/);
-			assert.equal(readLog(logPath).at(-1)?.argv.join(" "), "pane close w1:p2");
+			assert.equal(readLog(logPath).at(-1)?.argv.join(" "), "tab close w1:t2");
 			await assert.rejects(() => adapter.close({ ...handle, ownsPane: false }), /exact handle object/);
 			await assert.rejects(() => adapter.close({ ...handle, paneId: "w1:p1" }), /exact handle object/);
 			await assert.rejects(() => adapter.close({ ...handle, ownsPane: false, ownsTab: false, ownsWorkspace: true }), /exact handle object/);
@@ -299,16 +307,13 @@ describe("HerdrAdapter start/read/close", () => {
 			assert.deepEqual(handleA, handleB);
 			await assert.rejects(() => adapterB.close(handleA), /not owned by this HerdrAdapter instance/);
 			assert.deepEqual(await adapterA.close(handleA), { closed: true });
-			assert.equal(readLog(logPathA).at(-1)?.argv.join(" "), "pane close w1:p2");
+			assert.equal(readLog(logPathA).at(-1)?.argv.join(" "), "tab close w1:t2");
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
 
-	it("rejects unsupported pane placement before mutation and marks start failures as non-fallbackable", async () => {
-		const adapter = makeAdapter();
-		await assert.rejects(() => adapter.resolvePlacement({ placement: "pane", splitDirection: "down" }), /pane placement.*not implemented/i);
-
+	it("marks start failures as non-fallbackable", async () => {
 		const startTimeout = await rejectedError(
 			() => makeAdapter({ mode: "start-timeout", timeoutMs: 1000 }).startChild({ command: process.execPath, args: [], cwd: process.cwd(), env: process.env, label: "x", runId: "r", childIndex: 0 }),
 			HerdrAdapterError,

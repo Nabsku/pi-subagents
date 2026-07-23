@@ -486,7 +486,7 @@ export class HerdrAdapter {
 	}
 
 	private explicitParent(request: HerdrPlacementRequest): { workspaceId: string; tabId: string; paneId: string } | undefined {
-		if (request.parentTabId === undefined && request.parentPaneId === undefined && request.parentTerminalId === undefined) return undefined;
+		if (request.parentWorkspaceId === undefined && request.parentTabId === undefined && request.parentPaneId === undefined && request.parentTerminalId === undefined) return undefined;
 		if (!request.parentWorkspaceId || !request.parentTabId || !request.parentPaneId) {
 			throw new Error("invalid Herdr parent identity: workspace, tab, and pane IDs must be provided together");
 		}

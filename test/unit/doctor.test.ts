@@ -47,6 +47,10 @@ function makeChain(name: string, source: ChainConfig["source"]): ChainConfig {
 	};
 }
 
+function fixturePath(): string {
+	return path.resolve("test/fixtures/fake-herdr.mjs");
+}
+
 describe("buildDoctorReport", () => {
 	it("probes Herdr and its plugin by capability", () => {
 		const fake = diagnoseHerdr(process.execPath, [path.resolve("test/fixtures/fake-herdr.mjs")]);
@@ -55,6 +59,26 @@ describe("buildDoctorReport", () => {
 			pluginInstalled: true, pluginEnabled: true, splitSupported: true,
 			parentIdentity: { workspaceId: "w1", tabId: "w1:t1", paneId: "w1:p1" },
 		});
+	});
+
+	it("parses the live plugin-list envelope and rejects incompatible plugin capabilities", () => {
+		const modes = [
+			["legacy-plugin", { pluginInstalled: false, pluginEnabled: false, splitSupported: false }],
+			["wrong-plugin", { pluginInstalled: false, pluginEnabled: false, splitSupported: false }],
+			["missing-plugin", { pluginInstalled: false, pluginEnabled: false, splitSupported: false }],
+			["disabled-plugin", { pluginInstalled: true, pluginEnabled: false, splitSupported: false }],
+			["legacy-entrypoint", { pluginInstalled: true, pluginEnabled: true, splitSupported: false }],
+		] as const;
+		for (const [mode, expected] of modes) {
+			const diagnostic = diagnoseHerdr(process.execPath, [fixturePath(), "--control-mode", mode]);
+			assert.deepEqual({
+				pluginInstalled: diagnostic.pluginInstalled,
+				pluginEnabled: diagnostic.pluginEnabled,
+				splitSupported: diagnostic.splitSupported,
+			}, expected, mode);
+		}
+		const malformed = diagnoseHerdr(process.execPath, [fixturePath(), "--control-mode", "malformed-plugin-list"]);
+		assert.match(malformed.error ?? "", /plugin list response missing plugins array/);
 	});
 
 	it("prefers explicit parent identity from the Pi environment over focused snapshot state", () => {

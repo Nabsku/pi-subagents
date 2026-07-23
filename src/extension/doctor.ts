@@ -72,7 +72,8 @@ const DEFAULT_DEPS: DoctorDeps = {
 	diagnoseHerdr,
 };
 
-const HERDR_PLUGIN_IDS = new Set(["pi-subagents.herdr", "pi-subagents.hybrid"]);
+const HERDR_PLUGIN_ID = "pi-subagents.herdr";
+const HERDR_PLUGIN_ENTRYPOINT_ID = "subagent";
 
 function jsonCommand(executable: string, baseArgs: string[], args: string[]): Record<string, unknown> {
 	const output = execFileSync(executable, [...baseArgs, ...args], { encoding: "utf8", timeout: 2_000, maxBuffer: 2 * 1024 * 1024, windowsHide: true });
@@ -118,10 +119,16 @@ export function diagnoseHerdr(executable = process.env["HERDR_BIN_PATH"] ?? "her
 	try {
 		const schema = jsonCommand(executable, baseArgs, ["api", "schema", "--json"]);
 		const pluginsPayload = jsonCommand(executable, baseArgs, ["plugin", "list", "--json"]);
-		const plugins = Array.isArray(pluginsPayload.plugins) ? pluginsPayload.plugins : [];
-		const plugin = plugins.find((candidate) => candidate && typeof candidate === "object" && HERDR_PLUGIN_IDS.has(String((candidate as Record<string, unknown>).id))) as Record<string, unknown> | undefined;
-		const panes = plugin && Array.isArray(plugin.panes) ? plugin.panes : [];
-		const splitSupported = panes.some((pane) => pane && typeof pane === "object" && ["subagent", "relay-runner"].includes(String((pane as Record<string, unknown>).id)));
+		const pluginsResult = pluginsPayload.result;
+		if (!pluginsResult || typeof pluginsResult !== "object" || Array.isArray(pluginsResult)) throw new Error("plugin list response missing result object");
+		const plugins = (pluginsResult as Record<string, unknown>).plugins;
+		if (!Array.isArray(plugins)) throw new Error("plugin list response missing plugins array");
+		const plugin = plugins.find((candidate) => candidate && typeof candidate === "object" && !Array.isArray(candidate)
+			&& (candidate as Record<string, unknown>).plugin_id === HERDR_PLUGIN_ID) as Record<string, unknown> | undefined;
+		const entrypoints = plugin && Array.isArray(plugin.entrypoints) ? plugin.entrypoints : plugin && Array.isArray(plugin.panes) ? plugin.panes : [];
+		const hasSubagentCapability = entrypoints.some((capability) => capability && typeof capability === "object" && !Array.isArray(capability)
+			&& (capability as Record<string, unknown>).id === HERDR_PLUGIN_ENTRYPOINT_ID);
+		const splitSupported = plugin?.enabled === true && hasSubagentCapability;
 		let identity = parentIdentityFromEnv();
 		if (!identity) {
 			try { identity = parentIdentity(jsonCommand(executable, baseArgs, ["api", "snapshot"])); } catch {}

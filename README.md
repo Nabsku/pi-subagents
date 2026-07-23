@@ -49,7 +49,7 @@ Then create `~/.pi/agent/extensions/subagent/config.json`:
 
 Use `placement: "tab"` for one tab per child, or `placement: "pane"` with `splitDirection: "right"` or `"down"` to split the parent tab. Run the parent Pi session inside Herdr so the plugin receives the current workspace, tab, pane, and native Pi socket context. Start a fresh Pi process after changing this config.
 
-Requires Herdr 0.7.4+, Node.js 24+, macOS or Linux, and the matching fork build. Windows is not currently supported. A missing/disabled plugin, incompatible Herdr protocol, or Pi running outside Herdr fails explicitly. Use `fallback: "error"`; automatic fallback to headless is not implemented for this backend. The plugin pane is intentionally read-only and does not create a second orchestration registry.
+Requires Herdr 0.7.4+, Node.js 24+, macOS or Linux, and a repository/package build that includes this backend. The repository candidate and any separately installed npm package are distinct states; `/subagents-doctor` reports live Herdr launch capabilities, not whether installed package files match the checkout. Windows is not currently supported. A missing/disabled plugin, incompatible Herdr protocol, or Pi running outside Herdr fails explicitly. Use `fallback: "error"`; automatic fallback to headless is not implemented for this backend. The plugin pane is intentionally read-only and does not create a second orchestration registry.
 
 ## Try this first
 

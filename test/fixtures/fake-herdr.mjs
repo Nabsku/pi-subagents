@@ -286,11 +286,11 @@ if (mode === "server-stopped") {
 	process.stderr.write("Herdr server is not running\n");
 	process.exit(2);
 }
-if (mode === "malformed-json" || (mode === "malformed-start" && argv[0] === "agent" && argv[1] === "start")) {
+if (mode === "malformed-json" || (mode === "malformed-start" && argv[0] === "tab" && argv[1] === "create")) {
 	process.stdout.write("{not json\n");
 	process.exit(0);
 }
-if (mode === "timeout" || (mode === "start-timeout" && argv[0] === "agent" && argv[1] === "start")) {
+if (mode === "timeout" || (mode === "start-timeout" && argv[0] === "tab" && argv[1] === "create")) {
 	setTimeout(() => {}, 60_000);
 	process.stdin.resume();
 	process.exitCode = 0;
@@ -335,15 +335,21 @@ if (argv[0] === "plugin" && argv[1] === "link") {
 }
 if (argv[0] === "plugin" && argv[1] === "list" && argv[2] === "--json") {
 	const manifest = pluginManifest();
+	if (mode === "malformed-plugin-list") {
+		json({ id: "plugin-list", result: { plugins: "invalid" } });
+		process.exit(0);
+	}
+	const pluginId = mode === "legacy-plugin" ? "pi-subagents.hybrid" : mode === "wrong-plugin" ? "other.plugin" : manifest.id;
+	const entrypointId = mode === "legacy-entrypoint" ? "relay-runner" : PLUGIN_ENTRYPOINT;
 	json({
-		type: "plugin_list",
-		plugins: [{
-			id: manifest.id,
+		id: "plugin-list",
+		result: { plugins: mode === "missing-plugin" ? [] : [{
+			plugin_id: pluginId,
 			root: PLUGIN_ROOT,
-			enabled: true,
+			enabled: mode !== "disabled-plugin",
 			actions: manifest.actions.map((action) => ({ id: action.id, title: action.title, contexts: action.contexts })),
-			panes: manifest.panes.map((pane) => ({ id: pane.id, title: pane.title, placement: pane.placement })),
-		}],
+			entrypoints: manifest.panes.map((pane) => ({ id: entrypointId, title: pane.title, placement: pane.placement })),
+		}] },
 	});
 	process.exit(0);
 }
